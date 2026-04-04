@@ -42,7 +42,7 @@ from langchain_core.messages import (
     SystemMessage,      # The system prompt (instructions for the LLM)
     ToolMessage,        # Results from tool execution
 )
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 # ── Our tools from Step 1 ──────────────────────────────────────────────
 from tools.firecrawl_tool import search, scrape
@@ -189,11 +189,11 @@ TOOL_MAP = {
 
 def create_llm():
     """Create and return the LLM with tools bound to it."""
-    llm = ChatGroq(
-        model="llama-3.1-8b-instant",   # A fast and capable model for tool calling
-        api_key=os.getenv("GROQ_API_KEY"),
+    llm = ChatOpenAI(
+        model="worker-model",     # Maps to liteLLM config.yaml
+        api_key="litellm",        # Dummy key (not needed for localhost proxy)
+        base_url="http://0.0.0.0:4000",
         temperature=0,            # 0 = deterministic (same input → same output)
-                                   # We want consistency, not creativity, in research
     )
     # bind_tools = "Hey LLM, these tools exist, you can call them"
     llm_with_tools = llm.bind_tools(tools_for_llm + [SubmitFinalFindings])
