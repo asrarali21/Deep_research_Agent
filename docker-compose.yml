@@ -1,13 +1,36 @@
 version: '3.8'
 
 services:
+  # ── PostgreSQL: Permanent State Memory for LangGraph ──
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: researcher
+      POSTGRES_PASSWORD: research_pass
+      POSTGRES_DB: deep_research
+    volumes:
+      # Named volume = data survives container restarts and rebuilds
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # FastAPI won't connect until PostgreSQL reports it is fully ready
+      test: ["CMD-SHELL", "pg_isready -U researcher -d deep_research"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── LiteLLM: Model Routing Proxy ──
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     ports:
       - "4000:4000"
     volumes:
-      # Map our local YAML file into the Docker container
       - ./litellm_config.yaml:/app/config.yaml
     env_file:
       - .env
     command: [ "--config", "/app/config.yaml", "--detailed_debug" ]
+
+# Named volumes persist data even when containers are destroyed
+volumes:
+  pgdata:

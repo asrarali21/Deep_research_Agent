@@ -2,27 +2,19 @@ model_list:
   # ==========================================
   # THE ORCHESTRATOR MODEL (Reasoning/Planning)
   # ==========================================
-  # First priority: Gemini 2.0 Flash
   - model_name: orchestrator-model
     litellm_params:
-      model: gemini/gemini-2.0-flash
-      api_key: os.environ/GEMINI_API_KEY
+      # If using OpenRouter, LiteLLM requires the "openrouter/" prefix!
+      model: openrouter/openai/gpt-4o-mini
+      api_key: os.environ/OPEN_ROUTER_API_KEY
       
-  # Second priority: Groq Llama 3 (Fallback)
-  # Because the model_name is the same ('orchestrator-model'),
-  # LiteLLM automatically routes here if Gemini hits a 429 Rate Limit!
-  - model_name: orchestrator-model
-    litellm_params:
-      model: groq/llama-3.1-8b-instant
-      api_key: os.environ/GROQ_API_KEY
-
   # ==========================================
   # THE WORKER MODEL (Fast, Parallel scraping)
   # ==========================================
   - model_name: worker-model
     litellm_params:
-      model: groq/llama-3.1-8b-instant
-      api_key: os.environ/GROQ_API_KEY
+      model: openrouter/meta-llama/llama-3.3-70b-instruct
+      api_key: os.environ/OPEN_ROUTER_API_KEY
 
 litellm_settings:
   # Track spending and set a hard budget cap as requested

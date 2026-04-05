@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 # ── LangGraph imports ───────────────────────────────────────────────────
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
+from pydantic import ValidationError
 
 # ── LangChain imports ───────────────────────────────────────────────────
 from langchain_core.messages import (
@@ -275,22 +276,48 @@ def act_node(state: SubAgentState) -> dict:
         tool_fn = TOOL_MAP.get(tool_name)
 
         if tool_fn:
-            result = tool_fn(**tool_args)
+            try:
+                # SPECIAL TOOL: SubmitFinalFindings requires Pydantic Enforced Validation before we allow it to pass!
+                if tool_name in ("SubmitFinalFindings", "submit_final_findings"):
+                    # Validate the raw LLM JSON arguments instantly against the Pydantic logic!
+                    validated_data = SubmitFinalFindings(**tool_args)
+                    result = "Findings securely stored via Pydantic."
+                else:
+                    # Normal search or scrape tool
+                    result = tool_fn(**tool_args)
 
-            # Track URLs we've visited
-            if tool_name == "scrape" and isinstance(result, dict):
-                new_sources.append(result.get("url", ""))
-            elif tool_name == "search" and isinstance(result, list):
-                for r in result:
-                    new_sources.append(r.get("url", ""))
+                # Track URLs we've visited
+                if tool_name == "scrape" and isinstance(result, dict):
+                    new_sources.append(result.get("url", ""))
+                elif tool_name == "search" and isinstance(result, list):
+                    for r in result:
+                        new_sources.append(r.get("url", ""))
 
-            # Convert result to string for the LLM
-            result_str = json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
+                # Convert result to string for the LLM
+                result_str = json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
+                print(f"   ✅ [Act] Got result ({len(result_str)} chars)")
 
-            print(f"   ✅ [Act] Got result ({len(result_str)} chars)")
+            except ValidationError as e:
+                # 🚨 PYDANTIC FIRED AN ERROR! The LLM hallucinated the JSON schema!
+                # We return the exact Pydantic Error straight back to the LLM so it learns and fixes its mistake on the next iteration!
+                result_str = f"Pydantic Validation Error! Your arguments did not match the schema: {str(e)}\nPlease rewrite your tool call using the correct structure."
+                print(f"   ❌ [Act] {result_str}")
+            except Exception as e:
+                result_str = f"Execution Error: {str(e)}"
+                print(f"   ❌ [Act] {result_str}")
         else:
-            result_str = f"Error: Unknown tool '{tool_name}'"
-            print(f"   ❌ [Act] {result_str}")
+            # Fake tool for the final Pydantic check (if TOOL_MAP missed it)
+            if tool_name in ("SubmitFinalFindings", "submit_final_findings"):
+                try:
+                    SubmitFinalFindings(**tool_args)
+                    result_str = "Findings successfully recorded."
+                    print(f"   ✅ [Act] Pydantic Validated.")
+                except ValidationError as e:
+                    result_str = f"Pydantic Validation Error! {str(e)}"
+                    print(f"   ❌ [Act] {result_str}")
+            else:
+                result_str = f"Error: Unknown tool '{tool_name}'"
+                print(f"   ❌ [Act] {result_str}")
 
         # Wrap as ToolMessage — the LLM needs this format to understand
         # that this is a response to ITS tool call (matched by tool_call_id)
@@ -331,28 +358,38 @@ def finalize_node(state: SubAgentState) -> dict:
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         for tc in last_message.tool_calls:
             if tc["name"] in ("SubmitFinalFindings", "submit_final_findings"):
-                args = tc["args"]
-                findings = args.get("findings", [])
-                summary = args.get("summary", "")
-                print(f"\n📋 [Finalize] Extracted {len(findings)} findings via Pydantic Tool")
-                
-                # Create a fake ToolMessage to satisfy LangGraph's requirement that every tool call has a response
-                tool_msg = ToolMessage(content="Findings submitted successfully.", tool_call_id=tc["id"])
-                
-                return {
-                    "messages": [tool_msg],
-                    "findings": findings,
-                    "status": status,
-                }
+                try:
+                    # 1. STRICT Pydantic Enforcement! No manual type overwriting!
+                    validated_output = SubmitFinalFindings(**tc["args"])
+                    
+                    # 2. Extract perfectly structured fields based purely on Pydantic
+                    # Pydantic guarantees these are the exact correct types (List[Finding], str)
+                    findings = validated_output.findings
+                    summary = validated_output.summary
+                    
+                    print(f"\n📋 [Finalize] Extracted {len(findings)} findings via Strict Pydantic Validation\n")
+                    
+                    # Create a fake ToolMessage to satisfy LangGraph's requirement that every tool call has a response
+                    tool_msg = ToolMessage(content="Findings submitted gracefully.", tool_call_id=tc["id"])
+                    
+                    return {
+                        "messages": [tool_msg],
+                        "findings": findings,
+                        "status": status,
+                    }
+                except ValidationError as e:
+                    # If this happens, it means the graph exhausted max_iterations while repeatedly trying to fix Pydantic errors.
+                    print(f"\n📋 [Finalize] Pydantic Validation critically failed after max loops: {e}")
+                    pass
 
     # Fallback: if it just returned text instead of calling the tool
     content = last_message.content if hasattr(last_message, "content") else str(last_message)
     print(f"\n📋 [Finalize] Fallback: LLM didn't use Pydantic tool, returning raw text")
-    findings = [{
-        "fact": content[:500],
-        "source_url": "parsed_from_conversation",
-        "confidence": 0.5,
-    }]
+    findings = [Finding(
+        fact=content[:500],
+        source_url="parsed_from_conversation",
+        confidence=0.5
+    )]
 
     return {
         "findings": findings,
@@ -388,7 +425,14 @@ def should_continue(state: SubAgentState) -> str:
         # Check if the LLM is calling the final findings tool
         for tc in last_message.tool_calls:
             if tc["name"] in ("SubmitFinalFindings", "submit_final_findings"):
-                return "finalize"
+                try:
+                    # Only proceed to finalize if Pydantic actually validates!
+                    SubmitFinalFindings(**tc["args"])
+                    return "finalize"
+                except ValidationError:
+                    # If validation fails, route it to ACT! 
+                    # ACT will execute the Validation Error and feed it back to REASON.
+                    return "act"
         return "act"       # LLM wants to use search/scrape → go execute it
     else:
         return "finalize"  # LLM gave text response → it's done

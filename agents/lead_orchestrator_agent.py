@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
-from langgraph.checkpoint.memory import MemorySaver
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -97,10 +96,18 @@ def decompose_node(state: OrchestratorState):
         print(f"\n🧠 [Decompose] Drafting initial research tasks for query...")
 
     response = llm.invoke(prompt)
-    print(f"   → Generated {len(response.tasks)} sub-tasks.")
+    raw_tasks = response.tasks
+    if isinstance(raw_tasks, str):
+        safe_tasks = [raw_tasks]
+    elif not isinstance(raw_tasks, list):
+        safe_tasks = []
+    else:
+        safe_tasks = raw_tasks
+        
+    print(f"   → Generated {len(safe_tasks)} sub-tasks.")
     
     return {
-        "research_plan": response.tasks,
+        "research_plan": safe_tasks,
         "human_feedback": "" # Wipe the feedback slate clean after applying it
     }
 
@@ -126,7 +133,7 @@ def evaluate_node(state: OrchestratorState):
     query = state["original_query"]
     findings = state.get("findings", [])
     
-    findings_text = "\n".join([f"- {f.fact} (Confidence {f.confidence})" for f in findings])
+    findings_text = "\n".join([f"- {f.fact if hasattr(f, 'fact') else f.get('fact', 'Unknown')} (Confidence {f.confidence if hasattr(f, 'confidence') else f.get('confidence', 0.5)})" for f in findings])
     # Protect against empty findings across the board
     if not findings_text:
         findings_text = "No facts were found by the agents."
@@ -140,8 +147,16 @@ def evaluate_node(state: OrchestratorState):
     else:
         print(f"   → No gaps detected! Ready for synthesis.")
 
+    raw_gaps = response.gaps if not response.is_complete else []
+    if isinstance(raw_gaps, str):
+        safe_gaps = [raw_gaps]
+    elif not isinstance(raw_gaps, list):
+        safe_gaps = []
+    else:
+        safe_gaps = raw_gaps
+
     return {
-        "gaps": response.gaps if not response.is_complete else [],
+        "gaps": safe_gaps,
         "evaluation_rounds": state.get("evaluation_rounds", 0) + 1
     }
 
@@ -155,7 +170,7 @@ def synthesize_node(state: OrchestratorState):
     findings = state.get("findings", [])
     sources = list(set(state.get("sources", []))) # deduplicate
     
-    findings_text = "\n".join([f"- {f.fact} (Source: {f.source_url})" for f in findings])
+    findings_text = "\n".join([f"- {f.fact if hasattr(f, 'fact') else f.get('fact', 'Unknown')} (Source: {f.source_url if hasattr(f, 'source_url') else f.get('source_url', 'Unknown')})" for f in findings])
     
     prompt = f"User Query: {query}\n\nSynthesize a highly professional, comprehensive Markdown report using ONLY the following verified facts. DO NOT hallucinate. Group the report by logical headers.\n\nFacts:\n{findings_text}\n\nInclude a numbered reference list at the bottom matching the sources."
     
@@ -221,7 +236,7 @@ def route_evaluation(state: OrchestratorState):
 # PART 5: BUILD THE ORCHESTRATOR GRAPH
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def create_lead_orchestrator():
+def create_lead_orchestrator(checkpointer=None):
     """
     Build the master graph that rules the sub-agents.
     """
@@ -255,10 +270,9 @@ def create_lead_orchestrator():
     
     # ── Memory ── 
     # To support Interrupts (pausing), LangGraph REQUIRES short term memory (checkpointer)
-    # The state is written to memory, the console halts, and later it reads the memory again.
-    memory = MemorySaver()
+    # Passed in from the FastAPI lifespan (PostgreSQL)
     
     return builder.compile(
-        checkpointer=memory,
+        checkpointer=checkpointer,
         interrupt_before=["plan_review_node"] # 🛑 Pause execution exactly here
     )
