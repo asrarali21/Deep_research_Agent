@@ -24,7 +24,7 @@ def format_sse(data: str, event: str = "message") -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 # --- Streaming Generator ---
-def stream_graph_execution(graph, config, initial_state=None):
+async def stream_graph_execution(graph, config, initial_state=None):
     """
     Translates LangGraph chunk updates into SSE text strings.
     If initial_state is provided, it starts a new execution.
@@ -32,9 +32,9 @@ def stream_graph_execution(graph, config, initial_state=None):
     """
     try:
         # LangGraph Stream execution kicks off
-        stream_iterator = graph.stream(initial_state, config)
+        stream_iterator = graph.astream(initial_state, config)
         
-        for chunk in stream_iterator:
+        async for chunk in stream_iterator:
             for node_name, updates in chunk.items():
                 if node_name == "decompose_node":
                     plan = updates.get("research_plan", [])
@@ -56,7 +56,7 @@ def stream_graph_execution(graph, config, initial_state=None):
                     yield format_sse(f"✍️ [Synthesizer] Final report generated!")
                     
         # Once the stream loop finishes, we check if the Engine is Paused or Done
-        state = graph.get_state(config)
+        state = await graph.aget_state(config)
         
         if state.next:
             yield format_sse(f"⏸️ [SYSTEM] Graph paused. Waiting for human approval on the research plan.", event="paused")
@@ -115,13 +115,13 @@ async def resume_research(request: Request, req: ResumeRequest):
     
     # 1. Verify the thread actually exists
     graph = request.app.state.graph
-    state = graph.get_state(config)
+    state = await graph.aget_state(config)
     if not state or not state.values:
         raise HTTPException(status_code=400, detail="This thread does not exist.")
         
     # 2. Inject the human feedback into the state checkpointer
     # If req.feedback is "", it means they approved. If it has text, it means edit.
-    graph.update_state(config, {"human_feedback": req.feedback})
+    await graph.aupdate_state(config, {"human_feedback": req.feedback})
     
     # 3. Resume the stream! (initial_state=None tells LangGraph to continue from checkpoint)
     return StreamingResponse(
@@ -136,7 +136,7 @@ async def get_status(request: Request, thread_id: str):
     """
     config = {"configurable": {"thread_id": thread_id}}
     graph = request.app.state.graph
-    state = graph.get_state(config)
+    state = await graph.aget_state(config)
     
     if not state or not state.values:
         raise HTTPException(status_code=404, detail="Thread not found")
