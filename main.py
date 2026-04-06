@@ -1,16 +1,20 @@
 import os
 from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg_pool import AsyncConnectionPool
 
 from api.user_query import router as user_query_router
 from agents.lead_orchestrator_agent import create_lead_orchestrator
+from services.job_manager import ResearchJobManager
+from services.runtime import initialize_runtime, set_job_manager
 
 # Global variable to hold the DB pool so it can be cleanly closed
 db_pool = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,31 +28,40 @@ async def lifespan(app: FastAPI):
         raise ValueError("POSTGRES_DB_URL environment variable is missing!")
 
     print(f"🔌 Connecting to PostgreSQL at {db_url}...")
-    
-    # kwargs={"autocommit": True} is strictly required for the LangGraph saver .setup()
+
+    settings, coordination_store, _ = await initialize_runtime()
+
     db_pool = AsyncConnectionPool(
         conninfo=db_url,
         max_size=20,
         kwargs={"autocommit": True},
-        open=False
+        open=False,
     )
     await db_pool.open()
-    
-    # 1. Boot up the Async Postgres Checkpointer using the active pool
+
     checkpointer = AsyncPostgresSaver(db_pool)
-    
-    # 2. Automatically create/migrate the SQL tables (checkpoints, checkpoint_blobs, etc)
     print("🛠️  Initializing LangGraph Checkpoint SQL Tables (if they don't exist)...")
     await checkpointer.setup()
-    
-    # 3. Create the graph EXACTLY ONCE, injecting the postgres checkpointer into it!
+
     print("🧠 Compiling Master Graph...")
     app.state.graph = create_lead_orchestrator(checkpointer=checkpointer)
-    
+
+    app.state.settings = settings
+    app.state.coordination_store = coordination_store
+    app.state.job_manager = ResearchJobManager(
+        graph=app.state.graph,
+        coordination_store=coordination_store,
+        settings=settings,
+    )
+    set_job_manager(app.state.job_manager)
+    await app.state.job_manager.start()
+
     print("✅ Server Online and fully connected to Database!")
-    yield # --- Server handles requests here ---
-    
+    yield
+
     print("🛑 Shutting down server, cleanly closing Database Pool...")
+    await app.state.job_manager.close()
+    await coordination_store.close()
     await db_pool.close()
 
 app = FastAPI(

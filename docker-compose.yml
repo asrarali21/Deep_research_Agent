@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # ── PostgreSQL: Permanent State Memory for LangGraph ──
   postgres:
     image: postgres:16-alpine
     ports:
@@ -20,17 +19,16 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── LiteLLM: Model Routing Proxy ──
-  litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+  redis:
+    image: redis:7-alpine
     ports:
-      - "4000:4000"
-    volumes:
-      - ./litellm_config.yaml:/app/config.yaml
-    env_file:
-      - .env
-    command: [ "--config", "/app/config.yaml", "--detailed_debug" ]
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-# Named volumes persist data even when containers are destroyed
 volumes:
   pgdata:
