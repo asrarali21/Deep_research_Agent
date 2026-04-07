@@ -1,0 +1,155 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 9 11 16;
+  --surface: 17 20 27;
+  --surface-2: 23 27 35;
+  --border: 255 255 255;
+  --text: 245 247 251;
+  --muted: 153 163 181;
+  --accent: 103 232 249;
+  --accent-2: 56 189 248;
+  --success: 52 211 153;
+  --warning: 251 191 36;
+  --danger: 251 113 133;
+  --font-sora: "Avenir Next", "Montserrat", "Trebuchet MS", sans-serif;
+  --font-manrope: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-plex-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", "Monaco", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgba(103, 232, 249, 0.12), transparent 35%),
+    linear-gradient(180deg, #090b10 0%, #0b0f14 100%);
+  color: rgb(var(--text));
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::selection {
+  background: rgba(103, 232, 249, 0.25);
+}
+
+.app-grid-bg {
+  background-image:
+    radial-gradient(circle at top, rgba(103, 232, 249, 0.08), transparent 32%),
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 100% 100%, 36px 36px, 36px 36px;
+}
+
+.glass-panel {
+  backdrop-filter: blur(14px);
+  background: linear-gradient(180deg, rgba(17, 20, 27, 0.92), rgba(17, 20, 27, 0.82));
+}
+
+.report-prose {
+  color: rgb(var(--text));
+}
+
+.report-prose h1,
+.report-prose h2,
+.report-prose h3,
+.report-prose h4 {
+  font-family: var(--font-sora), sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.report-prose h1 {
+  margin: 0 0 1rem;
+  font-size: clamp(2rem, 4vw, 2.8rem);
+}
+
+.report-prose h2 {
+  margin: 2.2rem 0 0.8rem;
+  font-size: 1.4rem;
+}
+
+.report-prose h3 {
+  margin: 1.6rem 0 0.7rem;
+  font-size: 1.1rem;
+}
+
+.report-prose p,
+.report-prose li,
+.report-prose blockquote {
+  color: #d7ddea;
+  font-size: 1rem;
+  line-height: 1.8;
+}
+
+.report-prose ul,
+.report-prose ol {
+  padding-left: 1.25rem;
+}
+
+.report-prose li + li {
+  margin-top: 0.35rem;
+}
+
+.report-prose pre {
+  overflow-x: auto;
+  border: 1px solid rgb(var(--border) / 0.08);
+  border-radius: 16px;
+  background: rgba(9, 11, 16, 0.82);
+  padding: 1rem;
+}
+
+.report-prose code {
+  font-family: var(--font-plex-mono), monospace;
+  font-size: 0.92rem;
+}
+
+.report-prose :not(pre) > code {
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.15rem 0.4rem;
+}
+
+.report-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgb(var(--border) / 0.08);
+}
+
+.report-prose th,
+.report-prose td {
+  border-bottom: 1px solid rgb(var(--border) / 0.08);
+  padding: 0.8rem 1rem;
+  text-align: left;
+}
+
+.report-prose blockquote {
+  margin: 1.2rem 0;
+  border-left: 3px solid rgba(103, 232, 249, 0.5);
+  padding-left: 1rem;
+}
+
+.report-prose hr {
+  border: 0;
+  border-top: 1px solid rgb(var(--border) / 0.08);
+  margin: 2rem 0;
+}
