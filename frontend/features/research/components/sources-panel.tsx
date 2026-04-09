@@ -51,7 +51,7 @@ function SourcesContent({ sources, status }: { sources: SourceCard[]; status: st
         <p className="text-sm text-muted">
           {status === "done" || status === "failed"
             ? "No structured references were detected in the final Markdown report."
-            : "Once the report is generated, numbered references and URLs will be parsed into this panel."}
+            : "Live candidate and scraped sources will appear here during research, then final report references will replace or enrich them."}
         </p>
       )}
     </SectionCard>

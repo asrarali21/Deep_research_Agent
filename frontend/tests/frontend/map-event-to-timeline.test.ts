@@ -15,4 +15,24 @@ describe("mapEventToTimeline", () => {
       meta: ["Investigate pricing", "Investigate market size"],
     });
   });
+
+  it("maps live source events into research timeline entries", () => {
+    const item = mapEventToTimeline({
+      event: "source_batch",
+      data: {
+        thread_id: "abc",
+        task: "Diet evidence",
+        discovered_sources: ["https://example.com/a"],
+        scraped_sources: ["https://example.com/b"],
+        discovered_count: 1,
+        scraped_count: 1,
+      },
+    });
+
+    expect(item).toMatchObject({
+      kind: "research",
+      title: "Collected sources for: Diet evidence",
+      meta: ["https://example.com/b", "https://example.com/a"],
+    });
+  });
 });

@@ -41,6 +41,12 @@ class Settings:
     planner_input_char_budget: int
     worker_input_char_budget: int
     synthesis_input_char_budget: int
+    section_draft_output_tokens: int
+    final_report_output_tokens: int
+    min_distinct_sources_for_report: int
+    min_authoritative_sources_for_report: int
+    min_evidence_cards_for_report: int
+    min_sources_per_section: int
     provider_cooldown_seconds: int
     quota_cooldown_seconds: int
     transient_retry_base_seconds: float
@@ -68,10 +74,10 @@ def get_settings() -> Settings:
     return Settings(
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         max_initial_tasks=_int("MAX_INITIAL_TASKS", 4),
-        max_active_sub_agents_per_job=_int("MAX_ACTIVE_SUB_AGENTS_PER_JOB", 2),
-        max_gap_tasks_per_round=_int("MAX_GAP_TASKS_PER_ROUND", 2),
-        max_gap_rounds=_int("MAX_GAP_ROUNDS", 2),
-        max_sub_agent_iterations=_int("MAX_SUB_AGENT_ITERATIONS", 6),
+        max_active_sub_agents_per_job=_int("MAX_ACTIVE_SUB_AGENTS_PER_JOB", 1),
+        max_gap_tasks_per_round=_int("MAX_GAP_TASKS_PER_ROUND", 3),
+        max_gap_rounds=_int("MAX_GAP_ROUNDS", 3),
+        max_sub_agent_iterations=_int("MAX_SUB_AGENT_ITERATIONS", 8),
         max_active_jobs=_int("MAX_ACTIVE_JOBS", 2),
         max_queue_depth=_int("MAX_QUEUE_DEPTH", 25),
         queue_wait_timeout_seconds=_float("QUEUE_WAIT_TIMEOUT_SECONDS", 1.0),
@@ -80,13 +86,19 @@ def get_settings() -> Settings:
         queue_full_retry_after_seconds=_int("QUEUE_FULL_RETRY_AFTER_SECONDS", 5),
         search_cache_ttl_seconds=_int("SEARCH_CACHE_TTL_SECONDS", 900),
         scrape_cache_ttl_seconds=_int("SCRAPE_CACHE_TTL_SECONDS", 86400),
-        working_summary_char_limit=_int("WORKING_SUMMARY_CHAR_LIMIT", 4000),
-        recent_message_count=_int("RECENT_MESSAGE_COUNT", 4),
-        tool_result_char_limit=_int("TOOL_RESULT_CHAR_LIMIT", 4000),
-        search_result_limit=_int("SEARCH_RESULT_LIMIT", 8),
-        planner_input_char_budget=_int("PLANNER_INPUT_CHAR_BUDGET", 12000),
-        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 14000),
-        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 18000),
+        working_summary_char_limit=_int("WORKING_SUMMARY_CHAR_LIMIT", 8000),
+        recent_message_count=_int("RECENT_MESSAGE_COUNT", 6),
+        tool_result_char_limit=_int("TOOL_RESULT_CHAR_LIMIT", 8000),
+        search_result_limit=_int("SEARCH_RESULT_LIMIT", 10),
+        planner_input_char_budget=_int("PLANNER_INPUT_CHAR_BUDGET", 16000),
+        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 20000),
+        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 28000),
+        section_draft_output_tokens=_int("SECTION_DRAFT_OUTPUT_TOKENS", 850),
+        final_report_output_tokens=_int("FINAL_REPORT_OUTPUT_TOKENS", 3200),
+        min_distinct_sources_for_report=_int("MIN_DISTINCT_SOURCES_FOR_REPORT", 10),
+        min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 5),
+        min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 14),
+        min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 2),
         provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 30),
         quota_cooldown_seconds=_int("QUOTA_COOLDOWN_SECONDS", 900),
         transient_retry_base_seconds=_float("TRANSIENT_RETRY_BASE_SECONDS", 1.0),

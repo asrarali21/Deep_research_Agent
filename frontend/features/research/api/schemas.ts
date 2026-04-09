@@ -9,7 +9,9 @@ export const researchStatusSchema = z.object({
   retry_count: z.number(),
   provider_switch_count: z.number(),
   current_plan: z.array(z.string()),
+  required_sections: z.array(z.string()).optional(),
   extracted_facts_count: z.number(),
+  evidence_card_count: z.number().optional(),
   last_error: z.string(),
 });
 
@@ -24,19 +26,72 @@ export const researchEventSchema = z.discriminatedUnion("event", [
   }),
   z.object({
     event: z.literal("plan"),
-    data: z.object({ thread_id: z.string(), task_count: z.number(), plan: z.array(z.string()) }),
+    data: z.object({
+      thread_id: z.string(),
+      task_count: z.number(),
+      plan: z.array(z.string()),
+      required_sections: z.array(z.string()).optional(),
+    }),
   }),
   z.object({
     event: z.literal("agent"),
-    data: z.object({ thread_id: z.string(), status: z.literal("sub_agent_complete") }),
+    data: z.object({
+      thread_id: z.string(),
+      status: z.literal("sub_agent_complete"),
+      task: z.string().optional(),
+      evidence_count: z.number().optional(),
+      source_count: z.number().optional(),
+    }),
+  }),
+  z.object({
+    event: z.literal("source_batch"),
+    data: z.object({
+      thread_id: z.string(),
+      task: z.string(),
+      discovered_sources: z.array(z.string()),
+      scraped_sources: z.array(z.string()),
+      discovered_count: z.number(),
+      scraped_count: z.number(),
+    }),
+  }),
+  z.object({
+    event: z.literal("evidence_batch"),
+    data: z.object({
+      thread_id: z.string(),
+      task: z.string(),
+      evidence_count: z.number(),
+      finding_count: z.number(),
+      coverage_tags: z.array(z.string()),
+    }),
   }),
   z.object({
     event: z.literal("evaluate"),
-    data: z.object({ thread_id: z.string(), gaps: z.array(z.string()), gap_count: z.number() }),
+    data: z.object({
+      thread_id: z.string(),
+      gaps: z.array(z.string()),
+      gap_count: z.number(),
+      quality_summary: z.string().optional(),
+    }),
+  }),
+  z.object({
+    event: z.literal("outline"),
+    data: z.object({ thread_id: z.string(), sections: z.array(z.string()) }),
+  }),
+  z.object({
+    event: z.literal("section_draft"),
+    data: z.object({
+      thread_id: z.string(),
+      section: z.string(),
+      status: z.literal("section_drafted"),
+      char_count: z.number(),
+    }),
   }),
   z.object({
     event: z.literal("synthesize"),
-    data: z.object({ thread_id: z.string(), status: z.literal("finalizing_report") }),
+    data: z.object({
+      thread_id: z.string(),
+      status: z.union([z.literal("finalizing_report"), z.literal("final_editing_report")]),
+    }),
   }),
   z.object({
     event: z.literal("report"),

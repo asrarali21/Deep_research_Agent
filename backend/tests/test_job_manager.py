@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from agents.lead_orchestrator_agent import route_batch_dispatch
+from agents.lead_orchestrator_agent import _find_missing_sections, route_batch_dispatch
 from agents.sub_agent import Finding, _finding_to_dict
 from services.config import get_settings
 from services.coordination import InMemoryCoordinationStore
@@ -115,3 +115,65 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
             finding,
             {"fact": "Fact", "source_url": "https://example.com", "confidence": 0.8},
         )
+
+    async def test_sub_agent_chunks_emit_live_source_and_evidence_events(self):
+        thread_id = "thread-events"
+        await self.store.set_job_record(thread_id, {"status": "running"})
+
+        await self.manager._emit_graph_chunk(
+            thread_id,
+            {
+                "sub_agent": {
+                    "completed_tasks": ["Task A"],
+                    "discovered_sources": ["https://example.com/a", "https://example.com/b"],
+                    "sources": ["https://example.com/a"],
+                    "evidence_cards": [
+                        {
+                            "claim": "Claim",
+                            "source_url": "https://example.com/a",
+                            "source_title": "Example",
+                            "excerpt": "Excerpt",
+                            "section_tag": "diet_pattern",
+                            "source_type": "guideline",
+                            "authority_score": 9,
+                            "confidence": 0.9,
+                        }
+                    ],
+                    "coverage_tags": ["diet_pattern"],
+                    "findings": [{"fact": "Fact", "source_url": "https://example.com/a", "confidence": 0.9}],
+                }
+            },
+        )
+
+        replay, queue = await self.manager.subscribe(thread_id)
+        try:
+            self.assertEqual([event.event for event in replay], ["source_batch", "evidence_batch", "agent"])
+            self.assertEqual(replay[0].data["discovered_count"], 2)
+            self.assertEqual(replay[1].data["coverage_tags"], ["diet_pattern"])
+            self.assertEqual(replay[2].data["task"], "Task A")
+        finally:
+            await self.manager.unsubscribe(thread_id, queue)
+
+    def test_missing_sections_require_multiple_supporting_sources(self):
+        missing = _find_missing_sections(
+            ["Sodium", "Exercise"],
+            [
+                {
+                    "claim": "Lower sodium intake helps.",
+                    "source_url": "https://source-one.example/sodium",
+                    "section_tag": "sodium",
+                },
+                {
+                    "claim": "Exercise helps recovery.",
+                    "source_url": "https://source-one.example/exercise",
+                    "section_tag": "exercise",
+                },
+                {
+                    "claim": "Structured activity supports rehab.",
+                    "source_url": "https://source-two.example/exercise",
+                    "section_tag": "exercise",
+                },
+            ],
+        )
+
+        self.assertEqual(missing, ["Sodium"])

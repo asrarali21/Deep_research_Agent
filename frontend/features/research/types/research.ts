@@ -14,7 +14,9 @@ export type ResearchStatus = {
   retry_count: number;
   provider_switch_count: number;
   current_plan: string[];
+  required_sections?: string[];
   extracted_facts_count: number;
+  evidence_card_count?: number;
   last_error: string;
 };
 
@@ -30,22 +32,55 @@ export type StartedEvent = {
 
 export type PlanEvent = {
   event: "plan";
-  data: { thread_id: string; task_count: number; plan: string[] };
+  data: { thread_id: string; task_count: number; plan: string[]; required_sections?: string[] };
 };
 
 export type AgentEvent = {
   event: "agent";
-  data: { thread_id: string; status: "sub_agent_complete" };
+  data: { thread_id: string; status: "sub_agent_complete"; task?: string; evidence_count?: number; source_count?: number };
+};
+
+export type SourceBatchEvent = {
+  event: "source_batch";
+  data: {
+    thread_id: string;
+    task: string;
+    discovered_sources: string[];
+    scraped_sources: string[];
+    discovered_count: number;
+    scraped_count: number;
+  };
+};
+
+export type EvidenceBatchEvent = {
+  event: "evidence_batch";
+  data: {
+    thread_id: string;
+    task: string;
+    evidence_count: number;
+    finding_count: number;
+    coverage_tags: string[];
+  };
 };
 
 export type EvaluateEvent = {
   event: "evaluate";
-  data: { thread_id: string; gaps: string[]; gap_count: number };
+  data: { thread_id: string; gaps: string[]; gap_count: number; quality_summary?: string };
+};
+
+export type OutlineEvent = {
+  event: "outline";
+  data: { thread_id: string; sections: string[] };
+};
+
+export type SectionDraftEvent = {
+  event: "section_draft";
+  data: { thread_id: string; section: string; status: "section_drafted"; char_count: number };
 };
 
 export type SynthesizeEvent = {
   event: "synthesize";
-  data: { thread_id: string; status: "finalizing_report" };
+  data: { thread_id: string; status: "finalizing_report" | "final_editing_report" };
 };
 
 export type ReportEvent = {
@@ -78,7 +113,11 @@ export type ResearchEvent =
   | StartedEvent
   | PlanEvent
   | AgentEvent
+  | SourceBatchEvent
+  | EvidenceBatchEvent
   | EvaluateEvent
+  | OutlineEvent
+  | SectionDraftEvent
   | SynthesizeEvent
   | ReportEvent
   | PausedEvent
@@ -111,6 +150,7 @@ export type ResearchSessionState = {
   timeline: TimelineItem[];
   plan: string[];
   editablePlan: string[];
+  requiredSections: string[];
   rawReport: string;
   visibleReport: string;
   sources: SourceCard[];
@@ -118,6 +158,7 @@ export type ResearchSessionState = {
   retryCount: number;
   providerSwitchCount: number;
   extractedFactsCount: number;
+  evidenceCardCount: number;
   error?: string;
   rateLimitResetAt?: number;
   queueRetryAt?: number;

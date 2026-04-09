@@ -68,12 +68,20 @@ class ResearchJobManager:
             "original_query": query,
             "human_feedback": "",
             "research_plan": [],
+            "required_sections": [],
             "pending_tasks": [],
             "current_batch": [],
             "findings": [],
+            "evidence_cards": [],
             "sources": [],
+            "discovered_sources": [],
+            "coverage_tags": [],
+            "completed_tasks": [],
             "gaps": [],
+            "quality_summary": "",
             "evaluation_rounds": 0,
+            "outline_sections": [],
+            "section_drafts": {},
             "final_report": "",
         }
         record = {
@@ -87,6 +95,7 @@ class ResearchJobManager:
             "provider_switch_count": 0,
             "client_id": client_id,
             "current_plan": [],
+            "required_sections": [],
         }
         await self._coordination_store.set_job_record(thread_id, record)
         await self._coordination_store.enqueue_job(
@@ -133,12 +142,16 @@ class ResearchJobManager:
         config = {"configurable": {"thread_id": thread_id}}
         current_plan: list[str] = record.get("current_plan", [])
         extracted_facts_count = 0
+        evidence_card_count = 0
+        required_sections: list[str] = record.get("required_sections", [])
 
         try:
             state = await self._graph.aget_state(config)
             if state and state.values:
                 current_plan = state.values.get("research_plan", current_plan)
                 extracted_facts_count = len(state.values.get("findings", []))
+                evidence_card_count = len(state.values.get("evidence_cards", []))
+                required_sections = state.values.get("required_sections", required_sections)
         except Exception:
             pass
 
@@ -150,6 +163,8 @@ class ResearchJobManager:
             "provider_switch_count": int(record.get("provider_switch_count", 0)),
             "current_plan": current_plan,
             "extracted_facts_count": extracted_facts_count,
+            "evidence_card_count": evidence_card_count,
+            "required_sections": required_sections,
             "last_error": record.get("last_error", ""),
         }
 
@@ -257,24 +272,103 @@ class ResearchJobManager:
         for node_name, updates in chunk.items():
             if node_name == "decompose_node":
                 plan = updates.get("research_plan", [])
-                await self._coordination_store.update_job_record(thread_id, current_plan=plan)
+                required_sections = updates.get("required_sections", [])
+                await self._coordination_store.update_job_record(
+                    thread_id,
+                    current_plan=plan,
+                    required_sections=required_sections,
+                )
                 await self.publish_event(
                     thread_id,
                     "plan",
-                    {"thread_id": thread_id, "task_count": len(plan), "plan": plan},
+                    {
+                        "thread_id": thread_id,
+                        "task_count": len(plan),
+                        "plan": plan,
+                        "required_sections": required_sections,
+                    },
                 )
             elif node_name == "sub_agent":
-                await self.publish_event(thread_id, "agent", {"thread_id": thread_id, "status": "sub_agent_complete"})
+                completed_tasks = updates.get("completed_tasks", [])
+                task = completed_tasks[-1] if completed_tasks else ""
+                discovered_sources = updates.get("discovered_sources", [])
+                scraped_sources = updates.get("sources", [])
+                evidence_cards = updates.get("evidence_cards", [])
+                coverage_tags = updates.get("coverage_tags", [])
+                findings = updates.get("findings", [])
+
+                if discovered_sources or scraped_sources:
+                    await self.publish_event(
+                        thread_id,
+                        "source_batch",
+                        {
+                            "thread_id": thread_id,
+                            "task": task,
+                            "discovered_sources": discovered_sources,
+                            "scraped_sources": scraped_sources,
+                            "discovered_count": len(discovered_sources),
+                            "scraped_count": len(scraped_sources),
+                        },
+                    )
+                if evidence_cards or findings:
+                    await self.publish_event(
+                        thread_id,
+                        "evidence_batch",
+                        {
+                            "thread_id": thread_id,
+                            "task": task,
+                            "evidence_count": len(evidence_cards),
+                            "finding_count": len(findings),
+                            "coverage_tags": coverage_tags,
+                        },
+                    )
+                await self.publish_event(
+                    thread_id,
+                    "agent",
+                    {
+                        "thread_id": thread_id,
+                        "status": "sub_agent_complete",
+                        "task": task,
+                        "evidence_count": len(evidence_cards),
+                        "source_count": len(scraped_sources),
+                    },
+                )
             elif node_name == "evaluate_node":
                 gaps = updates.get("gaps", [])
                 await self.publish_event(
                     thread_id,
                     "evaluate",
-                    {"thread_id": thread_id, "gaps": gaps, "gap_count": len(gaps)},
+                    {
+                        "thread_id": thread_id,
+                        "gaps": gaps,
+                        "gap_count": len(gaps),
+                        "quality_summary": updates.get("quality_summary", ""),
+                    },
                 )
-            elif node_name == "synthesize_node":
+            elif node_name == "build_outline_node":
+                await self.publish_event(
+                    thread_id,
+                    "outline",
+                    {
+                        "thread_id": thread_id,
+                        "sections": updates.get("outline_sections", []),
+                    },
+                )
+            elif node_name == "draft_sections_node":
+                for section, content in updates.get("section_drafts", {}).items():
+                    await self.publish_event(
+                        thread_id,
+                        "section_draft",
+                        {
+                            "thread_id": thread_id,
+                            "section": section,
+                            "status": "section_drafted",
+                            "char_count": len(content),
+                        },
+                    )
+            elif node_name in {"final_edit_node", "synthesize_node"}:
                 await self.publish_event(
                     thread_id,
                     "synthesize",
-                    {"thread_id": thread_id, "status": "finalizing_report"},
+                    {"thread_id": thread_id, "status": "final_editing_report"},
                 )

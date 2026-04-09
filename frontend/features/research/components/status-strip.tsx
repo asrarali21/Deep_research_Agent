@@ -8,6 +8,7 @@ type StatusStripProps = {
   retryCount: number;
   providerSwitchCount: number;
   factsCount: number;
+  evidenceCount: number;
 };
 
 function statusVariant(status: string): "accent" | "success" | "warning" | "danger" | "neutral" {
@@ -26,7 +27,14 @@ function statusVariant(status: string): "accent" | "success" | "warning" | "dang
   }
 }
 
-export function StatusStrip({ status, queuePosition, retryCount, providerSwitchCount, factsCount }: StatusStripProps) {
+export function StatusStrip({
+  status,
+  queuePosition,
+  retryCount,
+  providerSwitchCount,
+  factsCount,
+  evidenceCount,
+}: StatusStripProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-panel border border-white/10 bg-white/[0.03] px-4 py-3">
       <Badge variant={statusVariant(status)} className="capitalize">
@@ -49,6 +57,10 @@ export function StatusStrip({ status, queuePosition, retryCount, providerSwitchC
       <div className="inline-flex items-center gap-2 text-sm text-muted">
         <DatabaseZap className="h-4 w-4" />
         Facts extracted {factsCount}
+      </div>
+      <div className="inline-flex items-center gap-2 text-sm text-muted">
+        <DatabaseZap className="h-4 w-4" />
+        Evidence cards {evidenceCount}
       </div>
     </div>
   );

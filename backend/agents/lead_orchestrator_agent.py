@@ -10,7 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field
 
-from agents.sub_agent import create_sub_agent_graph
+from agents.sub_agent import create_sub_agent_graph, normalize_section_tag
 from services.config import get_settings
 from services.model_router import RequestBudget
 from services.runtime import get_model_router, get_settings_instance
@@ -20,13 +20,21 @@ class OrchestratorState(TypedDict):
     thread_id: str
     original_query: str
     research_plan: list[str]
+    required_sections: list[str]
     pending_tasks: list[str]
     current_batch: list[str]
     human_feedback: str
     findings: Annotated[list[dict], operator.add]
+    evidence_cards: Annotated[list[dict], operator.add]
     sources: Annotated[list[str], operator.add]
+    discovered_sources: Annotated[list[str], operator.add]
+    coverage_tags: Annotated[list[str], operator.add]
+    completed_tasks: Annotated[list[str], operator.add]
     gaps: list[str]
+    quality_summary: str
     evaluation_rounds: int
+    outline_sections: list[str]
+    section_drafts: dict[str, str]
     final_report: str
 
 
@@ -34,14 +42,23 @@ class DecomposePlan(BaseModel):
     tasks: list[str] = Field(
         description="Highly specific research tasks that isolated workers can handle independently.",
     )
+    required_sections: list[str] = Field(
+        description="The sections a strong final report must cover.",
+    )
 
 
 class EvaluateGaps(BaseModel):
-    is_complete: bool = Field(description="True when the collected facts are enough to answer the query.")
+    is_complete: bool = Field(description="True when the collected evidence is deep enough to answer the query.")
     gaps: list[str] = Field(description="Specific missing questions that need another round of research.")
+    missing_sections: list[str] = Field(description="Important report sections that still need better evidence.")
+    quality_summary: str = Field(description="A short explanation of the current evidence quality and what is still weak.")
 
 
-def _dedupe_items(items: list[str], limit: int) -> list[str]:
+class OutlinePlan(BaseModel):
+    sections: list[str] = Field(description="The final report sections in the order they should appear.")
+
+
+def _dedupe_items(items: list[str], limit: int | None = None) -> list[str]:
     unique_items: list[str] = []
     seen = set()
     for item in items:
@@ -53,9 +70,86 @@ def _dedupe_items(items: list[str], limit: int) -> list[str]:
             continue
         seen.add(lowered)
         unique_items.append(cleaned)
-        if len(unique_items) >= limit:
+        if limit is not None and len(unique_items) >= limit:
             break
     return unique_items
+
+
+def _dedupe_urls(items: list[str]) -> list[str]:
+    return _dedupe_items(items, None)
+
+
+def _is_authoritative_evidence_card(card: dict) -> bool:
+    try:
+        score = int(card.get("authority_score", 0))
+    except (TypeError, ValueError):
+        score = 0
+    return score >= 8 or card.get("source_type") in {"guideline", "government", "journal", "academic", "hospital", "nonprofit"}
+
+
+def _section_to_source_map(evidence_cards: list[dict]) -> dict[str, set[str]]:
+    mapping: dict[str, set[str]] = {}
+    for card in evidence_cards:
+        tag = normalize_section_tag(card.get("section_tag", ""))
+        url = card.get("source_url", "").strip()
+        if not tag or not url:
+            continue
+        mapping.setdefault(tag, set()).add(url)
+    return mapping
+
+
+def _find_missing_sections(required_sections: list[str], evidence_cards: list[dict]) -> list[str]:
+    settings = get_settings()
+    source_map = _section_to_source_map(evidence_cards)
+    missing = []
+    for section in required_sections:
+        normalized = normalize_section_tag(section)
+        support_count = len(source_map.get(normalized, set()))
+        if support_count < settings.min_sources_per_section:
+            missing.append(section)
+    return missing
+
+
+def _format_findings(findings: list[dict], limit: int = 24) -> str:
+    lines: list[str] = []
+    for finding in findings[:limit]:
+        fact = finding.get("fact", "Unknown fact")
+        source = finding.get("source_url", "Unknown source")
+        confidence = finding.get("confidence", 0.5)
+        lines.append(f"- {fact} (Source: {source}; Confidence: {confidence})")
+    return "\n".join(lines) if lines else "No findings were collected."
+
+
+def _format_evidence_cards(evidence_cards: list[dict], limit: int = 24) -> str:
+    lines: list[str] = []
+    for card in evidence_cards[:limit]:
+        claim = card.get("claim", "Unknown claim")
+        excerpt = str(card.get("excerpt", ""))[:220]
+        source_title = card.get("source_title", "Unknown source")
+        source_url = card.get("source_url", "")
+        tag = normalize_section_tag(card.get("section_tag", "general"))
+        source_type = card.get("source_type", "unknown")
+        authority_score = card.get("authority_score", 0)
+        lines.append(
+            f"- [{tag}] {claim} | {source_title} | {source_type} | authority={authority_score} | {source_url} | excerpt={excerpt}"
+        )
+    return "\n".join(lines) if lines else "No structured evidence cards were collected."
+
+
+def _select_section_evidence(section: str, evidence_cards: list[dict], limit: int = 10) -> list[dict]:
+    normalized_section = normalize_section_tag(section)
+    matching = [card for card in evidence_cards if normalize_section_tag(card.get("section_tag", "")) == normalized_section]
+    if len(matching) < limit:
+        supplemental = [card for card in evidence_cards if card not in matching]
+        supplemental.sort(
+            key=lambda card: (
+                int(card.get("authority_score", 0)),
+                float(card.get("confidence", 0.0)),
+            ),
+            reverse=True,
+        )
+        matching.extend(supplemental[: max(0, limit - len(matching))])
+    return matching[:limit]
 
 
 async def decompose_node(state: OrchestratorState):
@@ -67,6 +161,7 @@ async def decompose_node(state: OrchestratorState):
     prompt = (
         "Break the user query into highly specific research tasks that can be run independently. "
         f"Create at most {settings.max_initial_tasks} tasks, ordered by importance. "
+        "Also define the essential report sections needed for a thorough final answer. "
         "Favor breadth first, avoid duplicate work, and keep each task self-contained."
     )
     if feedback:
@@ -80,17 +175,22 @@ async def decompose_node(state: OrchestratorState):
         task_type="planner",
         schema=DecomposePlan,
         messages=messages,
-        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=400),
+        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=500),
         trace_id=state["thread_id"],
     )
     safe_tasks = _dedupe_items(response.tasks, settings.max_initial_tasks)
+    required_sections = _dedupe_items(response.required_sections, max(5, settings.max_initial_tasks + 2))
 
     return {
         "research_plan": safe_tasks,
+        "required_sections": required_sections,
         "pending_tasks": safe_tasks,
         "current_batch": [],
         "gaps": [],
         "human_feedback": "",
+        "quality_summary": "",
+        "outline_sections": [],
+        "section_drafts": {},
     }
 
 
@@ -117,35 +217,48 @@ async def evaluate_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
     findings = state.get("findings", [])
-    distinct_sources = list(
-        dict.fromkeys(
-            [
-                f.get("source_url", "")
-                for f in findings
-                if isinstance(f, dict) and f.get("source_url")
-            ]
-        )
+    evidence_cards = state.get("evidence_cards", [])
+    required_sections = state.get("required_sections", [])
+
+    distinct_sources = _dedupe_urls(
+        [source for source in state.get("sources", []) if source]
+        + [card.get("source_url", "") for card in evidence_cards if card.get("source_url")]
+        + [finding.get("source_url", "") for finding in findings if finding.get("source_url")]
     )
-    findings_text = "\n".join(
-        [
-            f"- {f.fact if hasattr(f, 'fact') else f.get('fact', 'Unknown')} "
-            f"(Source {f.source_url if hasattr(f, 'source_url') else f.get('source_url', 'Unknown')}; "
-            f"Confidence {f.confidence if hasattr(f, 'confidence') else f.get('confidence', 0.5)})"
-            for f in findings
-        ]
+    authoritative_source_count = len(
+        {
+            card.get("source_url", "")
+            for card in evidence_cards
+            if card.get("source_url") and _is_authoritative_evidence_card(card)
+        }
     )
-    if not findings_text:
-        findings_text = "No facts were found by the workers."
+    missing_sections = _find_missing_sections(required_sections, evidence_cards)
+    code_gate_passed = (
+        len(distinct_sources) >= settings.min_distinct_sources_for_report
+        and authoritative_source_count >= settings.min_authoritative_sources_for_report
+        and len(evidence_cards) >= settings.min_evidence_cards_for_report
+        and not missing_sections
+    )
 
     messages = [
-        SystemMessage(content="You evaluate whether research results are complete and identify only material gaps."),
+        SystemMessage(
+            content=(
+                "You evaluate whether research results are complete and identify only material gaps. "
+                "Be strict. Do not approve shallow evidence."
+            )
+        ),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
-                f"Distinct Sources Collected: {len(distinct_sources)}\n\n"
-                f"Collected Findings:\n{findings_text}\n\n"
-                "Decide whether the answer is complete. For broad advice or research requests, do not mark complete if the evidence is shallow, repetitive, or based on too few distinct sources. "
-                "If not complete, provide only the most important missing questions."
+                f"Required Report Sections:\n{chr(10).join(f'- {section}' for section in required_sections) or '- None provided'}\n\n"
+                f"Distinct Sources Collected: {len(distinct_sources)}\n"
+                f"Authoritative Source Count: {authoritative_source_count}\n"
+                f"Structured Evidence Cards: {len(evidence_cards)}\n"
+                f"Missing Sections by Deterministic Check:\n{chr(10).join(f'- {section}' for section in missing_sections) or '- None'}\n\n"
+                f"Collected Findings:\n{_format_findings(findings)}\n\n"
+                f"Collected Evidence:\n{_format_evidence_cards(evidence_cards)}\n\n"
+                "Decide whether the answer is complete. For broad advice or research requests, do not mark complete if the evidence is shallow, repetitive, or based on too few distinct or authoritative sources. "
+                "If not complete, provide only the most important missing questions and sections."
             )
         ),
     ]
@@ -153,58 +266,137 @@ async def evaluate_node(state: OrchestratorState):
         task_type="evaluator",
         schema=EvaluateGaps,
         messages=messages,
-        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=300),
+        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=350),
         trace_id=state["thread_id"],
     )
 
+    llm_missing_sections = _dedupe_items(response.missing_sections, settings.max_gap_tasks_per_round)
+    combined_missing_sections = _dedupe_items(missing_sections + llm_missing_sections, settings.max_gap_tasks_per_round)
+
     next_gap_rounds = state.get("evaluation_rounds", 0)
     pending_gap_tasks: list[str] = []
-    if not response.is_complete:
-        pending_gap_tasks = _dedupe_items(response.gaps, settings.max_gap_tasks_per_round)
+    if not (code_gate_passed and response.is_complete and not combined_missing_sections):
+        pending_gap_tasks = _dedupe_items(
+            [f"Collect stronger evidence for section: {section}" for section in combined_missing_sections]
+            + response.gaps,
+            settings.max_gap_tasks_per_round,
+        )
         if pending_gap_tasks:
             next_gap_rounds += 1
+
+    quality_summary_parts = [
+        response.quality_summary.strip(),
+        f"distinct_sources={len(distinct_sources)}",
+        f"authoritative_sources={authoritative_source_count}",
+        f"evidence_cards={len(evidence_cards)}",
+    ]
+    if combined_missing_sections:
+        quality_summary_parts.append(f"missing_sections={', '.join(combined_missing_sections)}")
 
     return {
         "gaps": pending_gap_tasks,
         "pending_tasks": [f"Supplemental Gap Research: {gap}" for gap in pending_gap_tasks],
         "evaluation_rounds": next_gap_rounds,
+        "quality_summary": " | ".join(part for part in quality_summary_parts if part),
     }
 
 
-async def synthesize_node(state: OrchestratorState):
+async def build_outline_node(state: OrchestratorState):
     router = get_model_router()
-    findings = state.get("findings", [])
-    sources = list(
-        dict.fromkeys(
-            [source for source in state.get("sources", []) if source]
-            + [f.get("source_url", "") for f in findings if isinstance(f, dict) and f.get("source_url")]
-        )
-    )
-    findings_text = "\n".join(
-        [
-            f"- {f.fact if hasattr(f, 'fact') else f.get('fact', 'Unknown')} "
-            f"(Source: {f.source_url if hasattr(f, 'source_url') else f.get('source_url', 'Unknown')})"
-            for f in findings
-        ]
-    )
-
+    required_sections = state.get("required_sections", [])
+    evidence_cards = state.get("evidence_cards", [])
     messages = [
-        SystemMessage(content="You write production-grade reports using only verified facts."),
+        SystemMessage(content="You design a rigorous final report outline for a production research system."),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
-                f"Verified Findings:\n{findings_text}\n\n"
+                f"Required Sections:\n{chr(10).join(f'- {section}' for section in required_sections)}\n\n"
+                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=16)}\n\n"
+                "Create a concise but thorough report outline. Preserve important required sections, merge only if it improves clarity, and order the sections logically."
+            )
+        ),
+    ]
+    response = await router.generate_structured(
+        task_type="planner",
+        schema=OutlinePlan,
+        messages=messages,
+        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=400),
+        trace_id=state["thread_id"],
+    )
+    outline_sections = _dedupe_items(response.sections, max(len(required_sections) + 2, 6)) or required_sections
+    return {"outline_sections": outline_sections}
+
+
+async def draft_sections_node(state: OrchestratorState):
+    settings = get_settings()
+    router = get_model_router()
+    evidence_cards = state.get("evidence_cards", [])
+    findings = state.get("findings", [])
+    section_drafts: dict[str, str] = {}
+
+    for section in state.get("outline_sections", []):
+        selected_cards = _select_section_evidence(section, evidence_cards, limit=10)
+        evidence_text = _format_evidence_cards(selected_cards, limit=10)
+        messages = [
+            SystemMessage(content="You write one section of a high-quality research report using only the supplied evidence."),
+            HumanMessage(
+                content=(
+                    f"User Query: {state['original_query']}\n\n"
+                    f"Section Title: {section}\n\n"
+                    f"Relevant Evidence:\n{evidence_text}\n\n"
+                    f"Supporting Findings:\n{_format_findings(findings, limit=8)}\n\n"
+                    "Write a detailed Markdown section for this title. Be specific, practical, and evidence-driven. "
+                    "Use only the supplied evidence, note uncertainty where needed, and avoid generic filler."
+                )
+            ),
+        ]
+        response = await router.generate_text(
+            task_type="synthesis",
+            messages=messages,
+            budget=RequestBudget(
+                max_input_chars=min(get_settings_instance().synthesis_input_char_budget, 18000),
+                max_output_tokens=settings.section_draft_output_tokens,
+            ),
+            trace_id=state["thread_id"],
+        )
+        section_drafts[section] = response.content
+
+    return {"section_drafts": section_drafts}
+
+
+async def final_edit_node(state: OrchestratorState):
+    router = get_model_router()
+    findings = state.get("findings", [])
+    evidence_cards = state.get("evidence_cards", [])
+    sources = _dedupe_urls(
+        [source for source in state.get("sources", []) if source]
+        + [card.get("source_url", "") for card in evidence_cards if card.get("source_url")]
+        + [finding.get("source_url", "") for finding in findings if finding.get("source_url")]
+    )
+    section_drafts = state.get("section_drafts", {})
+    draft_text = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
+
+    messages = [
+        SystemMessage(content="You are a senior editor who writes production-grade reports using only verified facts and supplied drafts."),
+        HumanMessage(
+            content=(
+                f"User Query: {state['original_query']}\n\n"
+                f"Quality Summary: {state.get('quality_summary', 'No quality summary available.')}\n\n"
+                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=28)}\n\n"
+                f"Section Drafts:\n{draft_text}\n\n"
                 f"Known Sources:\n{chr(10).join(f'- {source}' for source in sources)}\n\n"
-                "Write a thorough Markdown report, not a brief summary. "
-                "Include: a short introduction, key evidence, practical recommendations, cautions or uncertainty where relevant, and a conclusion. "
-                "Use only the supplied findings. End with a numbered reference list that includes every materially used source URL."
+                "Write a comprehensive Markdown report, not a brief summary. Include: a short introduction, clear section headings, concrete recommendations, important cautions or uncertainty where relevant, and a conclusion. "
+                "Use only the supplied findings and evidence. End with a numbered reference list that includes every materially used source URL."
             )
         ),
     ]
     response = await router.generate_text(
         task_type="synthesis",
         messages=messages,
-        budget=RequestBudget(max_input_chars=get_settings_instance().synthesis_input_char_budget, max_output_tokens=2200),
+        budget=RequestBudget(
+            max_input_chars=get_settings_instance().synthesis_input_char_budget,
+            max_output_tokens=get_settings_instance().final_report_output_tokens,
+        ),
         trace_id=state["thread_id"],
     )
     return {"final_report": response.content}
@@ -228,8 +420,12 @@ def route_batch_dispatch(state: OrchestratorState):
                     "messages": [HumanMessage(content=f"Research the following topic strictly and thoroughly:\n\n{task}")],
                     "working_summary": "",
                     "findings": [],
+                    "evidence_cards": [],
                     "sources": [],
+                    "discovered_sources": [],
                     "seen_source_urls": [],
+                    "coverage_tags": [],
+                    "completed_tasks": [],
                     "iterations": 0,
                     "status": "running",
                 },
@@ -250,7 +446,7 @@ def route_evaluation(state: OrchestratorState):
     settings = get_settings()
     if state.get("pending_tasks") and state.get("evaluation_rounds", 0) <= settings.max_gap_rounds:
         return "dispatch_tasks_node"
-    return "synthesize_node"
+    return "build_outline_node"
 
 
 def create_lead_orchestrator(checkpointer=None):
@@ -262,7 +458,9 @@ def create_lead_orchestrator(checkpointer=None):
     builder.add_node("sub_agent", create_sub_agent_graph())
     builder.add_node("post_batch_node", post_batch_node)
     builder.add_node("evaluate_node", evaluate_node)
-    builder.add_node("synthesize_node", synthesize_node)
+    builder.add_node("build_outline_node", build_outline_node)
+    builder.add_node("draft_sections_node", draft_sections_node)
+    builder.add_node("final_edit_node", final_edit_node)
 
     builder.add_edge(START, "decompose_node")
     builder.add_edge("decompose_node", "plan_review_node")
@@ -271,7 +469,9 @@ def create_lead_orchestrator(checkpointer=None):
     builder.add_edge("sub_agent", "post_batch_node")
     builder.add_conditional_edges("post_batch_node", route_after_batch)
     builder.add_conditional_edges("evaluate_node", route_evaluation)
-    builder.add_edge("synthesize_node", END)
+    builder.add_edge("build_outline_node", "draft_sections_node")
+    builder.add_edge("draft_sections_node", "final_edit_node")
+    builder.add_edge("final_edit_node", END)
 
     return builder.compile(
         checkpointer=checkpointer,

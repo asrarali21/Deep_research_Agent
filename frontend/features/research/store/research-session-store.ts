@@ -6,6 +6,40 @@ import type { ResearchEvent, ResearchSessionState, ResearchStatus, SessionSnapsh
 import { mapEventToTimeline } from "@/features/research/utils/map-event-to-timeline";
 import { parseSourcesFromMarkdown } from "@/features/research/utils/parse-sources";
 
+function sourceCardFromUrl(url: string, note?: string) {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.replace(/^www\./, "");
+    return {
+      id: url,
+      index: 0,
+      title: hostname,
+      url,
+      hostname,
+      note,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeSources(existing: ResearchSessionState["sources"], urls: string[], note?: string) {
+  const merged = new Map(existing.map((source) => [source.url, source]));
+  for (const url of urls) {
+    const next = sourceCardFromUrl(url, note);
+    if (!next) {
+      continue;
+    }
+    const previous = merged.get(url);
+    merged.set(url, previous ? { ...previous, note: previous.note || note } : next);
+  }
+
+  return Array.from(merged.values()).map((source, index) => ({
+    ...source,
+    index: index + 1,
+  }));
+}
+
 type ResearchSessionActions = {
   startSession: (query: string) => void;
   reset: () => void;
@@ -36,6 +70,7 @@ export const initialSessionState: ResearchSessionState = {
   timeline: [],
   plan: [],
   editablePlan: [],
+  requiredSections: [],
   rawReport: "",
   visibleReport: "",
   sources: [],
@@ -43,6 +78,7 @@ export const initialSessionState: ResearchSessionState = {
   retryCount: 0,
   providerSwitchCount: 0,
   extractedFactsCount: 0,
+  evidenceCardCount: 0,
   error: undefined,
   rateLimitResetAt: undefined,
   queueRetryAt: undefined,
@@ -96,8 +132,30 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             timeline,
             plan: event.data.plan,
             editablePlan: event.data.plan,
+            requiredSections: event.data.required_sections?.length ? event.data.required_sections : state.requiredSections,
+          };
+        case "source_batch":
+          return {
+            ...state,
+            status: state.status === "queued" ? "running" : state.status,
+            timeline,
+            sources: mergeSources(
+              state.sources,
+              [...event.data.discovered_sources, ...event.data.scraped_sources],
+              event.data.task ? `Observed during: ${event.data.task}` : "Observed during research",
+            ),
+          };
+        case "evidence_batch":
+          return {
+            ...state,
+            status: state.status === "queued" ? "running" : state.status,
+            timeline,
+            evidenceCardCount: Math.max(state.evidenceCardCount, event.data.evidence_count),
+            extractedFactsCount: Math.max(state.extractedFactsCount, event.data.finding_count),
           };
         case "agent":
+        case "outline":
+        case "section_draft":
         case "evaluate":
         case "synthesize":
           return {
@@ -105,14 +163,20 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             status: state.status === "queued" ? "running" : state.status,
             timeline,
           };
-        case "report":
+        case "report": {
+          const parsedSources = parseSourcesFromMarkdown(event.data.report);
           return {
             ...state,
             rawReport: event.data.report,
-            sources: parseSourcesFromMarkdown(event.data.report),
+            sources: mergeSources(
+              state.sources,
+              parsedSources.map((source) => source.url),
+              "Referenced in final report",
+            ).map((source) => parsedSources.find((parsed) => parsed.url === source.url) ?? source),
             visibleReport: "",
             timeline,
           };
+        }
         case "paused":
           return {
             ...state,
@@ -146,8 +210,10 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             retryCount: event.data.retry_count,
             providerSwitchCount: event.data.provider_switch_count,
             extractedFactsCount: event.data.extracted_facts_count,
+            evidenceCardCount: event.data.evidence_card_count ?? state.evidenceCardCount,
             plan: event.data.current_plan.length ? event.data.current_plan : state.plan,
             editablePlan: event.data.current_plan.length ? event.data.current_plan : state.editablePlan,
+            requiredSections: event.data.required_sections?.length ? event.data.required_sections : state.requiredSections,
             error: event.data.last_error || state.error,
           };
       }
@@ -161,8 +227,10 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
       retryCount: status.retry_count,
       providerSwitchCount: status.provider_switch_count,
       extractedFactsCount: status.extracted_facts_count,
+      evidenceCardCount: status.evidence_card_count ?? state.evidenceCardCount,
       plan: status.current_plan.length ? status.current_plan : state.plan,
       editablePlan: status.current_plan.length ? status.current_plan : state.editablePlan,
+      requiredSections: status.required_sections?.length ? status.required_sections : state.requiredSections,
       error: status.last_error || state.error,
     })),
   setVisibleReport: (value) => set((state) => ({ ...state, visibleReport: value })),

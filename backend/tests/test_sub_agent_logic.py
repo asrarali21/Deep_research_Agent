@@ -27,8 +27,12 @@ class SubAgentLogicTests(unittest.TestCase):
                 ],
                 "working_summary": "",
                 "findings": [],
+                "evidence_cards": [],
                 "sources": [],
+                "discovered_sources": [],
                 "seen_source_urls": [],
+                "coverage_tags": [],
+                "completed_tasks": [],
                 "iterations": 1,
                 "status": "running",
             }
@@ -37,6 +41,11 @@ class SubAgentLogicTests(unittest.TestCase):
 
             self.assertEqual(result["seen_source_urls"], [])
             self.assertEqual(result["sources"], [])
+            self.assertEqual(result["discovered_sources"], ["https://example.com/article"])
             self.assertIn("https://example.com/article", result["working_summary"])
         finally:
             sub_agent.TOOL_MAP["SearchTool"] = original_tool
+
+    def test_normalize_section_tag_maps_common_medical_aliases(self):
+        self.assertEqual(sub_agent.normalize_section_tag("Cardiac Rehabilitation"), "cardiac_rehab")
+        self.assertEqual(sub_agent.normalize_section_tag("salt intake"), "sodium")

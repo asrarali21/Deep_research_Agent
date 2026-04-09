@@ -57,6 +57,7 @@ export function ChatLayout() {
             retryCount={state.retryCount}
             providerSwitchCount={state.providerSwitchCount}
             factsCount={state.extractedFactsCount}
+            evidenceCount={state.evidenceCardCount}
           />
 
           <div className="flex flex-wrap items-center justify-between gap-3">
