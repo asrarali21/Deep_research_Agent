@@ -16,6 +16,14 @@ from pydantic import BaseModel, Field, ValidationError
 from services.config import get_settings
 from services.model_router import RequestBudget
 from services.runtime import get_model_router, get_settings_instance
+from services.source_quality import (
+    compute_authority_score,
+    infer_source_type,
+    is_blocked_reference_url,
+    is_low_value_reference_url,
+    is_reference_usable,
+    looks_like_homepage,
+)
 from tools.firecrawl_tool import scrape, search
 
 load_dotenv()
@@ -32,20 +40,6 @@ SECTION_TAG_ALIASES: dict[str, tuple[str, ...]] = {
     "sleep_stress": ("sleep", "stress", "mental health"),
     "follow_up_cautions": ("follow up", "follow-up", "medication", "drug", "caution", "warning", "monitoring"),
 }
-
-AUTHORITATIVE_DOMAINS = (
-    ".gov",
-    ".edu",
-    "aha.org",
-    "acc.org",
-    "escardio.org",
-    "nih.gov",
-    "ncbi.nlm.nih.gov",
-    "pubmed.ncbi.nlm.nih.gov",
-    "mayoclinic.org",
-    "clevelandclinic.org",
-)
-
 
 class SubAgentState(TypedDict):
     trace_id: str
@@ -66,9 +60,11 @@ class SubAgentState(TypedDict):
 SYSTEM_PROMPT = """You are a quality-first research agent. Your job is to build a strong evidence pack for one specific research task.
 - Start with SearchTool, then use ScrapeTool on the most promising results.
 - Prefer authoritative sources such as medical societies, journals, government sites, hospitals, and major non-profit organizations.
+- For market or industry tasks, prioritize government notifications, company announcements, operator websites, industry reports, exchange filings, and reputable sector analysis with exact figures.
 - Avoid revisiting the same source unless the previous result was unusable.
 - Do not stop after only one or two facts. Gather multiple scraped sources and enough evidence to support a rich report section.
 - Extract only verifiable facts with source URLs and short supporting excerpts.
+- Prefer exact numbers, dates, named companies, pricing plans, regulations, and infrastructure counts over generic background explanations.
 - Tag evidence with concise section labels such as diet_pattern, sodium, saturated_fat, fiber, exercise, cardiac_rehab, smoking_alcohol, sleep_stress, or follow_up_cautions when relevant.
 - When you truly have enough material, call SubmitFinalFindings with findings, evidence_cards, and coverage_tags.
 - Use the provided tool-calling interface. Do not write XML tags, <function=...> wrappers, or raw JSON manually.
@@ -124,51 +120,6 @@ def normalize_section_tag(value: str) -> str:
         if any(alias in cleaned for alias in aliases):
             return canonical
     return cleaned.replace(" ", "_")
-
-
-def infer_source_type(url: str) -> str:
-    split = urlsplit(url)
-    hostname = split.netloc.lower()
-    path = split.path.lower()
-    if not hostname:
-        return "unknown"
-    if hostname.endswith(".gov"):
-        return "government"
-    if hostname.endswith(".edu"):
-        return "academic"
-    if "pubmed" in hostname or "ncbi" in hostname or "nejm" in hostname or "thelancet" in hostname or "jamanetwork" in hostname:
-        return "journal"
-    if any(token in hostname for token in ("clinic", "hospital", "healthsystem", "medicine")):
-        return "hospital"
-    if any(token in hostname for token in ("heart.org", "acc.org", "escardio.org", "who.int", "nih.gov")):
-        return "guideline"
-    if any(token in path for token in ("guideline", "guidelines", "statement", "scientific-statement")):
-        return "guideline"
-    if any(token in hostname for token in ("news", "cnn", "forbes", "reuters")):
-        return "news"
-    if any(token in hostname for token in ("healthline", "webmd", "verywellhealth")):
-        return "commercial_health"
-    return "nonprofit" if hostname.endswith(".org") else "commercial"
-
-
-def compute_authority_score(url: str, source_type: str | None = None) -> int:
-    hostname = urlsplit(url).netloc.lower()
-    source_type = source_type or infer_source_type(url)
-    if any(domain in hostname for domain in AUTHORITATIVE_DOMAINS):
-        return 10
-    if source_type in {"guideline", "government", "journal"}:
-        return 9
-    if source_type in {"academic", "hospital", "nonprofit"}:
-        return 8
-    if source_type == "news":
-        return 5
-    if source_type == "commercial_health":
-        return 4
-    if source_type == "commercial":
-        return 3
-    return 2
-
-
 def _dedupe_strings(items: list[str]) -> list[str]:
     unique_items: list[str] = []
     seen = set()
@@ -237,7 +188,10 @@ def _extract_summary_fragment(tool_name: str, result) -> str:
             title = item.get("title", "Untitled")
             url = item.get("url", "")
             snippet = item.get("snippet", "")
-            lines.append(f"- {title} | {url} | {snippet[:160]}")
+            source_type = item.get("source_type", "unknown")
+            authority = item.get("authority_score", 0)
+            relevance = round(float(item.get("relevance_score", 0.0)), 1)
+            lines.append(f"- {title} | {url} | {source_type} | authority={authority} | score={relevance} | {snippet[:140]}")
         return "\n".join(lines)
 
     if tool_name == "ScrapeTool" and isinstance(result, dict):
@@ -257,6 +211,94 @@ def _merge_working_summary(existing: str, tool_name: str, result) -> str:
     if len(combined) > settings.working_summary_char_limit:
         combined = combined[-settings.working_summary_char_limit :]
     return combined
+
+
+def _validated_evidence_cards(raw_cards: list[dict], scraped_sources: list[str]) -> list[dict]:
+    allowed_sources = set(scraped_sources)
+    valid_cards: list[dict] = []
+    seen = set()
+    for card in raw_cards:
+        source_url = str(card.get("source_url", "")).strip()
+        claim = str(card.get("claim", "")).strip()
+        excerpt = str(card.get("excerpt", "")).strip()
+        if not source_url or not claim or not excerpt:
+            continue
+        if source_url not in allowed_sources:
+            continue
+        if not is_reference_usable(source_url) or is_blocked_reference_url(source_url):
+            continue
+        source_type = card.get("source_type") or infer_source_type(source_url)
+        authority_score = int(card.get("authority_score", compute_authority_score(source_url, source_type)))
+        cleaned = {
+            **card,
+            "source_url": source_url,
+            "claim": claim,
+            "excerpt": excerpt[:450],
+            "section_tag": normalize_section_tag(card.get("section_tag", "")),
+            "source_type": source_type,
+            "authority_score": authority_score,
+            "source_title": str(card.get("source_title", "")).strip() or urlsplit(source_url).netloc,
+        }
+        key = (cleaned["section_tag"], source_url, cleaned["claim"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        valid_cards.append(cleaned)
+    return valid_cards
+
+
+def _validated_findings(raw_findings: list[Finding], scraped_sources: list[str]) -> list[dict]:
+    allowed_sources = set(scraped_sources)
+    validated: list[dict] = []
+    seen = set()
+    for finding in raw_findings:
+        source_url = finding.source_url.strip()
+        if source_url not in allowed_sources or not is_reference_usable(source_url):
+            continue
+        key = (finding.fact.strip().lower(), source_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        validated.append(_finding_to_dict(finding))
+    return validated
+
+
+def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindings) -> tuple[list[str], list[dict], list[dict], list[str]]:
+    settings = get_settings()
+    scraped_sources = _dedupe_strings(list(state.get("sources", [])))
+    valid_evidence_cards = _validated_evidence_cards(
+        [_evidence_to_dict(card) for card in submitted.evidence_cards],
+        scraped_sources,
+    )
+    valid_findings = _validated_findings(submitted.findings, scraped_sources)
+    authoritative_sources = {
+        card["source_url"]
+        for card in valid_evidence_cards
+        if int(card.get("authority_score", 0)) >= 8 and not is_low_value_reference_url(card["source_url"])
+    }
+    coverage_tags = _dedupe_strings(
+        [normalize_section_tag(tag) for tag in submitted.coverage_tags]
+        + [normalize_section_tag(card.get("section_tag", "")) for card in valid_evidence_cards]
+    )
+
+    issues: list[str] = []
+    if len(scraped_sources) < settings.min_scraped_sources_per_task:
+        issues.append(f"Need at least {settings.min_scraped_sources_per_task} scraped sources before finalizing.")
+    if len(valid_evidence_cards) < settings.min_evidence_cards_per_task:
+        issues.append(
+            f"Need at least {settings.min_evidence_cards_per_task} evidence cards backed by scraped sources before finalizing."
+        )
+    if len(authoritative_sources) < settings.min_authoritative_sources_per_task:
+        issues.append(
+            f"Need at least {settings.min_authoritative_sources_per_task} authoritative scraped source before finalizing."
+        )
+    if not valid_findings:
+        issues.append("Need at least one validated finding backed by a scraped source.")
+
+    if any(looks_like_homepage(url) for url in scraped_sources) and len(scraped_sources) <= settings.min_scraped_sources_per_task:
+        issues.append("Do not rely mainly on homepage URLs. Scrape article, report, policy, or guideline pages.")
+
+    return issues, valid_findings, valid_evidence_cards, coverage_tags
 
 
 async def reason_node(state: SubAgentState) -> dict:
@@ -330,7 +372,25 @@ def act_node(state: SubAgentState) -> dict:
             except Exception as error:
                 result = f"Execution Error: {error}"
         elif tool_name == "SubmitFinalFindings":
-            result = "Findings successfully recorded."
+            try:
+                submitted = SubmitFinalFindings(**tool_args)
+                issues, valid_findings, valid_evidence_cards, coverage_tags = assess_submission_quality(state, submitted)
+                if issues and state.get("iterations", 0) < get_settings().max_sub_agent_iterations:
+                    result = {
+                        "accepted": False,
+                        "issues": issues,
+                        "validated_findings": len(valid_findings),
+                        "validated_evidence_cards": len(valid_evidence_cards),
+                        "coverage_tags": coverage_tags,
+                    }
+                else:
+                    result = {
+                        "accepted": True,
+                        "validated_findings": len(valid_findings),
+                        "validated_evidence_cards": len(valid_evidence_cards),
+                    }
+            except ValidationError as error:
+                result = f"Pydantic Validation Error: {error}"
         else:
             result = f"Error: Unknown tool '{tool_name}'"
 
@@ -381,16 +441,14 @@ def finalize_node(state: SubAgentState) -> dict:
             if tool_call["name"] == "SubmitFinalFindings":
                 try:
                     validated = SubmitFinalFindings(**tool_call["args"])
+                    issues, valid_findings, valid_evidence_cards, coverage_tags = assess_submission_quality(state, validated)
+                    if issues and status != "max_iterations":
+                        break
                     tool_message = ToolMessage(content="Findings submitted gracefully.", tool_call_id=tool_call["id"])
-                    evidence_cards = [_evidence_to_dict(card) for card in validated.evidence_cards]
-                    coverage_tags = _dedupe_strings(
-                        [normalize_section_tag(tag) for tag in validated.coverage_tags]
-                        + [normalize_section_tag(card["section_tag"]) for card in evidence_cards if card.get("section_tag")]
-                    )
                     scraped_sources = _dedupe_strings(
                         list(state.get("sources", []))
-                        + [card["source_url"] for card in evidence_cards if card.get("source_url")]
-                        + [finding.source_url for finding in validated.findings if finding.source_url]
+                        + [card["source_url"] for card in valid_evidence_cards if card.get("source_url")]
+                        + [finding["source_url"] for finding in valid_findings if finding.get("source_url")]
                     )
                     discovered_sources = _dedupe_strings(
                         list(state.get("discovered_sources", []))
@@ -398,8 +456,8 @@ def finalize_node(state: SubAgentState) -> dict:
                     )
                     return {
                         "messages": [tool_message],
-                        "findings": [_finding_to_dict(finding) for finding in validated.findings],
-                        "evidence_cards": evidence_cards,
+                        "findings": valid_findings,
+                        "evidence_cards": valid_evidence_cards,
                         "coverage_tags": coverage_tags,
                         "sources": scraped_sources,
                         "discovered_sources": discovered_sources,
@@ -447,7 +505,10 @@ def should_continue(state: SubAgentState) -> str:
         for tool_call in last_message.tool_calls:
             if tool_call["name"] == "SubmitFinalFindings":
                 try:
-                    SubmitFinalFindings(**tool_call["args"])
+                    submitted = SubmitFinalFindings(**tool_call["args"])
+                    issues, _, _, _ = assess_submission_quality(state, submitted)
+                    if issues:
+                        return "act"
                     return "finalize"
                 except ValidationError:
                     return "act"

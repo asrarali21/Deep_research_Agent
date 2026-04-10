@@ -49,3 +49,50 @@ class SubAgentLogicTests(unittest.TestCase):
     def test_normalize_section_tag_maps_common_medical_aliases(self):
         self.assertEqual(sub_agent.normalize_section_tag("Cardiac Rehabilitation"), "cardiac_rehab")
         self.assertEqual(sub_agent.normalize_section_tag("salt intake"), "sodium")
+
+    def test_assess_submission_quality_rejects_unscraped_and_weak_sources(self):
+        state = {
+            "trace_id": "trace-1",
+            "task": "task",
+            "messages": [],
+            "working_summary": "",
+            "findings": [],
+            "evidence_cards": [],
+            "sources": ["https://example.com/source-a"],
+            "discovered_sources": ["https://example.com/source-a", "https://duckduckgo.com"],
+            "seen_source_urls": ["https://example.com/source-a"],
+            "coverage_tags": [],
+            "completed_tasks": [],
+            "iterations": 1,
+            "status": "running",
+        }
+        submitted = sub_agent.SubmitFinalFindings(
+            findings=[
+                sub_agent.Finding(
+                    fact="Fact",
+                    source_url="https://duckduckgo.com",
+                    confidence=0.9,
+                )
+            ],
+            evidence_cards=[
+                sub_agent.EvidenceCard(
+                    claim="Claim",
+                    source_url="https://duckduckgo.com",
+                    source_title="DuckDuckGo",
+                    excerpt="Snippet",
+                    section_tag="general",
+                    source_type="commercial",
+                    authority_score=1,
+                    confidence=0.9,
+                )
+            ],
+            coverage_tags=["general"],
+            summary="Summary",
+        )
+
+        issues, valid_findings, valid_cards, coverage_tags = sub_agent.assess_submission_quality(state, submitted)
+
+        self.assertTrue(issues)
+        self.assertEqual(valid_findings, [])
+        self.assertEqual(valid_cards, [])
+        self.assertEqual(coverage_tags, ["general"])

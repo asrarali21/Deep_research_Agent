@@ -14,6 +14,14 @@ from agents.sub_agent import create_sub_agent_graph, normalize_section_tag
 from services.config import get_settings
 from services.model_router import RequestBudget
 from services.runtime import get_model_router, get_settings_instance
+from services.source_quality import (
+    compute_authority_score,
+    infer_source_type,
+    is_blocked_reference_url,
+    is_low_value_reference_url,
+    is_reference_usable,
+    looks_like_homepage,
+)
 
 
 class OrchestratorState(TypedDict):
@@ -85,6 +93,90 @@ def _is_authoritative_evidence_card(card: dict) -> bool:
     except (TypeError, ValueError):
         score = 0
     return score >= 8 or card.get("source_type") in {"guideline", "government", "journal", "academic", "hospital", "nonprofit"}
+
+
+def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str]) -> list[dict]:
+    allowed_sources = set(source for source in scraped_sources if is_reference_usable(source))
+    curated: list[dict] = []
+    seen = set()
+    for card in evidence_cards:
+        source_url = str(card.get("source_url", "")).strip()
+        claim = str(card.get("claim", "")).strip()
+        if not source_url or not claim:
+            continue
+        if source_url not in allowed_sources:
+            continue
+        if is_blocked_reference_url(source_url):
+            continue
+        source_type = card.get("source_type") or infer_source_type(source_url)
+        authority_score = int(card.get("authority_score", compute_authority_score(source_url, source_type)))
+        if is_low_value_reference_url(source_url) and authority_score < 8:
+            continue
+        if looks_like_homepage(source_url) and authority_score < 9:
+            continue
+        cleaned = {
+            **card,
+            "source_url": source_url,
+            "claim": claim,
+            "excerpt": str(card.get("excerpt", "")).strip()[:450],
+            "source_title": str(card.get("source_title", "")).strip() or source_url,
+            "source_type": source_type,
+            "authority_score": authority_score,
+            "section_tag": normalize_section_tag(card.get("section_tag", "")),
+        }
+        key = (cleaned["section_tag"], source_url, cleaned["claim"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        curated.append(cleaned)
+    curated.sort(
+        key=lambda card: (
+            int(card.get("authority_score", 0)),
+            float(card.get("confidence", 0.0)),
+        ),
+        reverse=True,
+    )
+    return curated
+
+
+def _curated_sources(state: OrchestratorState) -> list[str]:
+    raw_sources = _dedupe_urls(
+        [source for source in state.get("sources", []) if source]
+        + [card.get("source_url", "") for card in state.get("evidence_cards", []) if card.get("source_url")]
+        + [finding.get("source_url", "") for finding in state.get("findings", []) if finding.get("source_url")]
+    )
+    return [source for source in raw_sources if is_reference_usable(source) and not is_blocked_reference_url(source)]
+
+
+def _build_references_section(evidence_cards: list[dict], limit: int = 18) -> str:
+    unique_cards: list[dict] = []
+    seen_urls = set()
+    for card in evidence_cards:
+        source_url = card.get("source_url", "")
+        if not source_url or source_url in seen_urls:
+            continue
+        seen_urls.add(source_url)
+        unique_cards.append(card)
+        if len(unique_cards) >= limit:
+            break
+
+    if not unique_cards:
+        return "## References\n\n1. No validated references were available."
+
+    lines = ["## References", ""]
+    for index, card in enumerate(unique_cards, start=1):
+        title = card.get("source_title", "Untitled source").strip() or "Untitled source"
+        url = card.get("source_url", "")
+        source_type = card.get("source_type", "unknown")
+        lines.append(f"{index}. [{title}]({url}) ({source_type})")
+    return "\n".join(lines)
+
+
+def _replace_references_section(report: str, reference_section: str) -> str:
+    marker = "\n## References"
+    if marker in report:
+        report = report.split(marker, 1)[0].rstrip()
+    return f"{report.rstrip()}\n\n{reference_section}\n"
 
 
 def _section_to_source_map(evidence_cards: list[dict]) -> dict[str, set[str]]:
@@ -217,11 +309,11 @@ async def evaluate_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
     findings = state.get("findings", [])
-    evidence_cards = state.get("evidence_cards", [])
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
     required_sections = state.get("required_sections", [])
 
     distinct_sources = _dedupe_urls(
-        [source for source in state.get("sources", []) if source]
+        [source for source in _curated_sources(state) if source]
         + [card.get("source_url", "") for card in evidence_cards if card.get("source_url")]
         + [finding.get("source_url", "") for finding in findings if finding.get("source_url")]
     )
@@ -258,7 +350,7 @@ async def evaluate_node(state: OrchestratorState):
                 f"Collected Findings:\n{_format_findings(findings)}\n\n"
                 f"Collected Evidence:\n{_format_evidence_cards(evidence_cards)}\n\n"
                 "Decide whether the answer is complete. For broad advice or research requests, do not mark complete if the evidence is shallow, repetitive, or based on too few distinct or authoritative sources. "
-                "If not complete, provide only the most important missing questions and sections."
+                "If not complete, provide only the most important missing questions and sections. Reject generic market-analysis filler, vague statements, or unsupported competitor claims."
             )
         ),
     ]
@@ -304,7 +396,7 @@ async def evaluate_node(state: OrchestratorState):
 async def build_outline_node(state: OrchestratorState):
     router = get_model_router()
     required_sections = state.get("required_sections", [])
-    evidence_cards = state.get("evidence_cards", [])
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
     messages = [
         SystemMessage(content="You design a rigorous final report outline for a production research system."),
         HumanMessage(
@@ -312,7 +404,8 @@ async def build_outline_node(state: OrchestratorState):
                 f"User Query: {state['original_query']}\n\n"
                 f"Required Sections:\n{chr(10).join(f'- {section}' for section in required_sections)}\n\n"
                 f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=16)}\n\n"
-                "Create a concise but thorough report outline. Preserve important required sections, merge only if it improves clarity, and order the sections logically."
+                "Create a concise but thorough report outline. Preserve important required sections, merge only if it improves clarity, and order the sections logically. "
+                "For market topics, favor sections like market size, infrastructure footprint, key players, pricing/business models, policy tailwinds, economics, and outlook."
             )
         ),
     ]
@@ -330,13 +423,13 @@ async def build_outline_node(state: OrchestratorState):
 async def draft_sections_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
-    evidence_cards = state.get("evidence_cards", [])
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
     findings = state.get("findings", [])
     section_drafts: dict[str, str] = {}
 
     for section in state.get("outline_sections", []):
-        selected_cards = _select_section_evidence(section, evidence_cards, limit=10)
-        evidence_text = _format_evidence_cards(selected_cards, limit=10)
+        selected_cards = _select_section_evidence(section, evidence_cards, limit=14)
+        evidence_text = _format_evidence_cards(selected_cards, limit=14)
         messages = [
             SystemMessage(content="You write one section of a high-quality research report using only the supplied evidence."),
             HumanMessage(
@@ -346,7 +439,9 @@ async def draft_sections_node(state: OrchestratorState):
                     f"Relevant Evidence:\n{evidence_text}\n\n"
                     f"Supporting Findings:\n{_format_findings(findings, limit=8)}\n\n"
                     "Write a detailed Markdown section for this title. Be specific, practical, and evidence-driven. "
-                    "Use only the supplied evidence, note uncertainty where needed, and avoid generic filler."
+                    "Use only the supplied evidence, note uncertainty where needed, and avoid generic filler. "
+                    "Do not use placeholders like 'USD Billion', 'robust CAGR', or 'data is not specified' without explicitly saying which evidence was missing. "
+                    "Prefer concrete numbers, named companies, policies, and dated developments when the evidence contains them."
                 )
             ),
         ]
@@ -367,14 +462,11 @@ async def draft_sections_node(state: OrchestratorState):
 async def final_edit_node(state: OrchestratorState):
     router = get_model_router()
     findings = state.get("findings", [])
-    evidence_cards = state.get("evidence_cards", [])
-    sources = _dedupe_urls(
-        [source for source in state.get("sources", []) if source]
-        + [card.get("source_url", "") for card in evidence_cards if card.get("source_url")]
-        + [finding.get("source_url", "") for finding in findings if finding.get("source_url")]
-    )
+    sources = _curated_sources(state)
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources)
     section_drafts = state.get("section_drafts", {})
     draft_text = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
+    reference_section = _build_references_section(evidence_cards)
 
     messages = [
         SystemMessage(content="You are a senior editor who writes production-grade reports using only verified facts and supplied drafts."),
@@ -386,7 +478,9 @@ async def final_edit_node(state: OrchestratorState):
                 f"Section Drafts:\n{draft_text}\n\n"
                 f"Known Sources:\n{chr(10).join(f'- {source}' for source in sources)}\n\n"
                 "Write a comprehensive Markdown report, not a brief summary. Include: a short introduction, clear section headings, concrete recommendations, important cautions or uncertainty where relevant, and a conclusion. "
-                "Use only the supplied findings and evidence. End with a numbered reference list that includes every materially used source URL."
+                "Use tables or bullet comparisons when they make the evidence easier to understand, especially for pricing, major players, timelines, or policy changes. "
+                "Use only the supplied findings and evidence. Do not invent market share tables, competitor claims, or numeric projections that are not present in the evidence. "
+                "Do not add a references section; it will be appended separately from validated evidence."
             )
         ),
     ]
@@ -399,7 +493,7 @@ async def final_edit_node(state: OrchestratorState):
         ),
         trace_id=state["thread_id"],
     )
-    return {"final_report": response.content}
+    return {"final_report": _replace_references_section(response.content, reference_section)}
 
 
 def route_human_approval(state: OrchestratorState):

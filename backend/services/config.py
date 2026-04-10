@@ -43,6 +43,9 @@ class Settings:
     synthesis_input_char_budget: int
     section_draft_output_tokens: int
     final_report_output_tokens: int
+    min_scraped_sources_per_task: int
+    min_evidence_cards_per_task: int
+    min_authoritative_sources_per_task: int
     min_distinct_sources_for_report: int
     min_authoritative_sources_for_report: int
     min_evidence_cards_for_report: int
@@ -89,12 +92,15 @@ def get_settings() -> Settings:
         working_summary_char_limit=_int("WORKING_SUMMARY_CHAR_LIMIT", 8000),
         recent_message_count=_int("RECENT_MESSAGE_COUNT", 6),
         tool_result_char_limit=_int("TOOL_RESULT_CHAR_LIMIT", 8000),
-        search_result_limit=_int("SEARCH_RESULT_LIMIT", 10),
+        search_result_limit=_int("SEARCH_RESULT_LIMIT", 12),
         planner_input_char_budget=_int("PLANNER_INPUT_CHAR_BUDGET", 16000),
-        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 20000),
-        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 28000),
-        section_draft_output_tokens=_int("SECTION_DRAFT_OUTPUT_TOKENS", 850),
-        final_report_output_tokens=_int("FINAL_REPORT_OUTPUT_TOKENS", 3200),
+        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 24000),
+        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 36000),
+        section_draft_output_tokens=_int("SECTION_DRAFT_OUTPUT_TOKENS", 1200),
+        final_report_output_tokens=_int("FINAL_REPORT_OUTPUT_TOKENS", 4200),
+        min_scraped_sources_per_task=_int("MIN_SCRAPED_SOURCES_PER_TASK", 3),
+        min_evidence_cards_per_task=_int("MIN_EVIDENCE_CARDS_PER_TASK", 5),
+        min_authoritative_sources_per_task=_int("MIN_AUTHORITATIVE_SOURCES_PER_TASK", 1),
         min_distinct_sources_for_report=_int("MIN_DISTINCT_SOURCES_FOR_REPORT", 10),
         min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 5),
         min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 14),

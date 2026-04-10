@@ -13,7 +13,10 @@ class FirecrawlToolCacheTests(unittest.TestCase):
         response = SimpleNamespace(
             web=[SimpleNamespace(title="Example", url="https://example.com", description="Snippet")]
         )
-        with patch.object(firecrawl_tool._app, "search", return_value=response) as mock_search:
+        with (
+            patch.object(firecrawl_tool._app, "search", return_value=response) as mock_search,
+            patch.object(firecrawl_tool, "_run_ddg_search", return_value=[]),
+        ):
             first = firecrawl_tool.search("Example Query", limit=3)
             second = firecrawl_tool.search("  example   query  ", limit=3)
 
@@ -28,3 +31,19 @@ class FirecrawlToolCacheTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(mock_scrape.call_count, 1)
+
+    def test_search_filters_blocked_placeholder_urls_and_keeps_real_results(self):
+        response = SimpleNamespace(
+            web=[
+                SimpleNamespace(title="DuckDuckGo", url="https://duckduckgo.com", description="Bad placeholder"),
+                SimpleNamespace(title="Official Policy", url="https://www.indiaevpolicy.in/fame-ii", description="Government policy update"),
+            ]
+        )
+        with (
+            patch.object(firecrawl_tool._app, "search", return_value=response),
+            patch.object(firecrawl_tool, "_run_ddg_search", return_value=[]),
+        ):
+            results = firecrawl_tool.search("India EV charging policy", limit=3)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], "https://www.indiaevpolicy.in/fame-ii")
