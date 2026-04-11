@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from services.config import Settings
 from services.coordination import CoordinationStore
+from services.model_router import ProviderUnavailableError
 
 
 @dataclass(slots=True)
@@ -23,6 +24,7 @@ class ResearchJobManager:
         self._coordination_store = coordination_store
         self._settings = settings
         self._worker_tasks: list[asyncio.Task] = []
+        self._scheduled_requeues: dict[str, asyncio.Task] = {}
         self._subscriber_queues: dict[str, set[asyncio.Queue]] = defaultdict(set)
         self._recent_events: dict[str, deque[JobEvent]] = defaultdict(lambda: deque(maxlen=100))
         self._shutdown = asyncio.Event()
@@ -38,8 +40,12 @@ class ResearchJobManager:
         self._shutdown.set()
         for task in self._worker_tasks:
             task.cancel()
+        for task in self._scheduled_requeues.values():
+            task.cancel()
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        await asyncio.gather(*self._scheduled_requeues.values(), return_exceptions=True)
         self._worker_tasks.clear()
+        self._scheduled_requeues.clear()
 
     async def submit_start(self, query: str, client_id: str) -> str:
         decision = await self._coordination_store.check_rate_limit(
@@ -96,6 +102,9 @@ class ResearchJobManager:
             "client_id": client_id,
             "current_plan": [],
             "required_sections": [],
+            "quota_wait_until": None,
+            "quota_retry_after_seconds": 0,
+            "waiting_task_type": "",
         }
         await self._coordination_store.set_job_record(thread_id, record)
         await self._coordination_store.enqueue_job(
@@ -122,6 +131,9 @@ class ResearchJobManager:
             thread_id,
             status="queued",
             last_error="",
+            quota_wait_until=None,
+            quota_retry_after_seconds=0,
+            waiting_task_type="",
         )
         await self._coordination_store.enqueue_job(
             thread_id,
@@ -165,6 +177,9 @@ class ResearchJobManager:
             "extracted_facts_count": extracted_facts_count,
             "evidence_card_count": evidence_card_count,
             "required_sections": required_sections,
+            "quota_wait_until": record.get("quota_wait_until"),
+            "quota_retry_after_seconds": int(record.get("quota_retry_after_seconds", 0)),
+            "waiting_task_type": record.get("waiting_task_type", ""),
             "last_error": record.get("last_error", ""),
         }
 
@@ -225,6 +240,9 @@ class ResearchJobManager:
             thread_id,
             status="running",
             started_at=time.time(),
+            quota_wait_until=None,
+            quota_retry_after_seconds=0,
+            waiting_task_type="",
         )
         await self.publish_event(
             thread_id,
@@ -251,10 +269,31 @@ class ResearchJobManager:
                 thread_id,
                 status="done",
                 finished_at=time.time(),
+                quota_wait_until=None,
+                quota_retry_after_seconds=0,
+                waiting_task_type="",
             )
             if final_report:
                 await self.publish_event(thread_id, "report", {"thread_id": thread_id, "report": final_report})
             await self.publish_event(thread_id, "done", {"thread_id": thread_id, "status": "done"})
+        except ProviderUnavailableError as error:
+            if error.should_wait_for_retryable_provider:
+                await self._transition_to_quota_wait(thread_id, payload, error)
+                return
+            await self._coordination_store.update_job_record(
+                thread_id,
+                status="failed",
+                finished_at=time.time(),
+                last_error=str(error),
+                quota_wait_until=None,
+                quota_retry_after_seconds=0,
+                waiting_task_type="",
+            )
+            await self.publish_event(
+                thread_id,
+                "failed",
+                {"thread_id": thread_id, "status": "failed", "error": str(error)},
+            )
         except Exception as error:
             await self._coordination_store.update_job_record(
                 thread_id,
@@ -372,3 +411,80 @@ class ResearchJobManager:
                     "synthesize",
                     {"thread_id": thread_id, "status": "final_editing_report"},
                 )
+
+    async def _transition_to_quota_wait(
+        self,
+        thread_id: str,
+        payload: dict[str, Any],
+        error: ProviderUnavailableError,
+    ) -> None:
+        retry_after_seconds = error.retry_after_seconds
+        wait_until = time.time() + retry_after_seconds
+        await self._coordination_store.update_job_record(
+            thread_id,
+            status="waiting_for_quota",
+            last_error=str(error),
+            quota_wait_until=wait_until,
+            quota_retry_after_seconds=retry_after_seconds,
+            waiting_task_type=error.task_type,
+        )
+        await self.publish_event(
+            thread_id,
+            "waiting_for_quota",
+            {
+                "thread_id": thread_id,
+                "status": "waiting_for_quota",
+                "task_type": error.task_type,
+                "retry_after_seconds": retry_after_seconds,
+                "available_at": wait_until,
+                "error": str(error),
+            },
+        )
+        self._schedule_requeue(thread_id, payload, retry_after_seconds)
+
+    def _schedule_requeue(self, thread_id: str, payload: dict[str, Any], delay_seconds: int) -> None:
+        existing = self._scheduled_requeues.pop(thread_id, None)
+        if existing is not None:
+            existing.cancel()
+
+        async def delayed_requeue() -> None:
+            try:
+                await asyncio.sleep(max(1, delay_seconds))
+                record = await self._coordination_store.get_job_record(thread_id)
+                if record is None:
+                    return
+                if record.get("status") != "waiting_for_quota":
+                    return
+                await self._coordination_store.update_job_record(
+                    thread_id,
+                    status="queued",
+                    last_error="",
+                    quota_wait_until=None,
+                    quota_retry_after_seconds=0,
+                    waiting_task_type="",
+                )
+                await self._coordination_store.enqueue_job(
+                    thread_id,
+                    {
+                        "kind": "resume_after_quota",
+                        "thread_id": thread_id,
+                        "initial_state": None,
+                    },
+                )
+                await self.publish_event(
+                    thread_id,
+                    "queued",
+                    {
+                        "thread_id": thread_id,
+                        "status": "queued",
+                        "resume": True,
+                        "reason": "quota_wait_complete",
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self._scheduled_requeues.pop(thread_id, None)
+
+        task = asyncio.create_task(delayed_requeue(), name=f"quota-requeue-{thread_id}")
+        self._scheduled_requeues[thread_id] = task

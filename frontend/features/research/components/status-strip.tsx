@@ -17,6 +17,7 @@ function statusVariant(status: string): "accent" | "success" | "warning" | "dang
       return "accent";
     case "done":
       return "success";
+    case "waiting_for_quota":
     case "paused":
     case "queued":
       return "warning";

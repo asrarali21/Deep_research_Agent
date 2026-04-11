@@ -82,6 +82,14 @@ export function MessageList({
           </MessageBubble>
         ) : null}
 
+        {session.status === "waiting_for_quota" ? (
+          <MessageBubble variant="system" title="Waiting for provider quota">
+            The backend paused this run while provider quota resets.
+            {session.waitingTaskType ? ` The blocked stage is ${session.waitingTaskType}.` : ""}
+            {session.quotaWaitUntil ? " It will resume automatically once quota becomes available." : ""}
+          </MessageBubble>
+        ) : null}
+
         {session.status === "paused" ? (
           <PlanReviewPanel
             plan={session.editablePlan}

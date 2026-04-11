@@ -35,4 +35,23 @@ describe("mapEventToTimeline", () => {
       meta: ["https://example.com/b", "https://example.com/a"],
     });
   });
+
+  it("maps quota wait events into system timeline entries", () => {
+    const item = mapEventToTimeline({
+      event: "waiting_for_quota",
+      data: {
+        thread_id: "abc",
+        status: "waiting_for_quota",
+        task_type: "planner",
+        retry_after_seconds: 120,
+        available_at: Date.now() + 120_000,
+        error: "All providers are temporarily unavailable",
+      },
+    });
+
+    expect(item).toMatchObject({
+      kind: "system",
+      title: "Waiting for provider quota reset",
+    });
+  });
 });

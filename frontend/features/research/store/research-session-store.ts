@@ -82,6 +82,8 @@ export const initialSessionState: ResearchSessionState = {
   error: undefined,
   rateLimitResetAt: undefined,
   queueRetryAt: undefined,
+  quotaWaitUntil: undefined,
+  waitingTaskType: undefined,
   isStreaming: false,
   isThinkingOpen: true,
   isSourcesOpenMobile: false,
@@ -125,6 +127,17 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             status: "running",
             timeline,
             error: undefined,
+            quotaWaitUntil: undefined,
+            waitingTaskType: undefined,
+          };
+        case "waiting_for_quota":
+          return {
+            ...state,
+            status: "waiting_for_quota",
+            timeline,
+            error: event.data.error,
+            quotaWaitUntil: event.data.available_at,
+            waitingTaskType: event.data.task_type,
           };
         case "plan":
           return {
@@ -183,6 +196,8 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             status: "paused",
             isStreaming: false,
             timeline,
+            quotaWaitUntil: undefined,
+            waitingTaskType: undefined,
           };
         case "done":
           return {
@@ -191,6 +206,8 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             isStreaming: false,
             connectionLost: false,
             timeline,
+            quotaWaitUntil: undefined,
+            waitingTaskType: undefined,
           };
         case "failed":
           return {
@@ -200,6 +217,8 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             isStreaming: false,
             connectionLost: false,
             timeline,
+            quotaWaitUntil: undefined,
+            waitingTaskType: undefined,
           };
         case "heartbeat":
           return {
@@ -214,6 +233,8 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             plan: event.data.current_plan.length ? event.data.current_plan : state.plan,
             editablePlan: event.data.current_plan.length ? event.data.current_plan : state.editablePlan,
             requiredSections: event.data.required_sections?.length ? event.data.required_sections : state.requiredSections,
+            quotaWaitUntil: event.data.quota_wait_until ?? state.quotaWaitUntil,
+            waitingTaskType: event.data.waiting_task_type || state.waitingTaskType,
             error: event.data.last_error || state.error,
           };
       }
@@ -231,6 +252,8 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
       plan: status.current_plan.length ? status.current_plan : state.plan,
       editablePlan: status.current_plan.length ? status.current_plan : state.editablePlan,
       requiredSections: status.required_sections?.length ? status.required_sections : state.requiredSections,
+      quotaWaitUntil: status.quota_wait_until ?? state.quotaWaitUntil,
+      waitingTaskType: status.waiting_task_type || state.waitingTaskType,
       error: status.last_error || state.error,
     })),
   setVisibleReport: (value) => set((state) => ({ ...state, visibleReport: value })),

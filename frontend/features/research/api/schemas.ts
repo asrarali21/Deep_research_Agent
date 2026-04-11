@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const statusSchema = z.enum(["queued", "running", "paused", "done", "failed"]);
+const statusSchema = z.enum(["queued", "running", "waiting_for_quota", "paused", "done", "failed"]);
 
 export const researchStatusSchema = z.object({
   thread_id: z.string(),
@@ -12,17 +12,36 @@ export const researchStatusSchema = z.object({
   required_sections: z.array(z.string()).optional(),
   extracted_facts_count: z.number(),
   evidence_card_count: z.number().optional(),
+  quota_wait_until: z.number().nullable().optional(),
+  quota_retry_after_seconds: z.number().optional(),
+  waiting_task_type: z.string().optional(),
   last_error: z.string(),
 });
 
 export const researchEventSchema = z.discriminatedUnion("event", [
   z.object({
     event: z.literal("queued"),
-    data: z.object({ thread_id: z.string(), status: z.literal("queued"), resume: z.literal(true).optional() }),
+    data: z.object({
+      thread_id: z.string(),
+      status: z.literal("queued"),
+      resume: z.literal(true).optional(),
+      reason: z.string().optional(),
+    }),
   }),
   z.object({
     event: z.literal("started"),
     data: z.object({ thread_id: z.string(), status: z.literal("running"), worker: z.number() }),
+  }),
+  z.object({
+    event: z.literal("waiting_for_quota"),
+    data: z.object({
+      thread_id: z.string(),
+      status: z.literal("waiting_for_quota"),
+      task_type: z.string(),
+      retry_after_seconds: z.number(),
+      available_at: z.number(),
+      error: z.string(),
+    }),
   }),
   z.object({
     event: z.literal("plan"),

@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from agents.sub_agent import Finding, _finding_to_dict
 from services.config import get_settings
 from services.coordination import InMemoryCoordinationStore
 from services.job_manager import ResearchJobManager
+from services.model_router import ProviderBlock, ProviderPolicy, ProviderUnavailableError
 
 
 class DummyGraph:
@@ -41,6 +43,34 @@ class DummyGraph:
     async def aupdate_state(self, config, updates):
         thread_id = config["configurable"]["thread_id"]
         self._states[thread_id]["values"].update(updates)
+
+
+class QuotaWaitingGraph:
+    async def astream(self, initial_state, config):
+        if False:
+            yield {}
+        policy = ProviderPolicy(
+            name="gemini",
+            provider_type="gemini",
+            model="gemini-2.5-flash",
+            task_types=("planner",),
+            priority=0,
+            request_limit_per_minute=10,
+            token_limit_per_minute=1000,
+            max_parallel_requests=1,
+        )
+        raise ProviderUnavailableError(
+            task_type="planner",
+            blocked=[ProviderBlock(policy=policy, reason="quota", ttl_seconds=1)],
+            supported=["gemini"],
+            message="All providers are temporarily unavailable for task type 'planner': gemini: quota (1s)",
+        )
+
+    async def aget_state(self, config):
+        return SimpleNamespace(next=[], values={})
+
+    async def aupdate_state(self, config, updates):
+        return None
 
 
 class JobManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -177,3 +207,82 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(missing, ["Sodium"])
+
+    async def test_quota_unavailable_jobs_wait_and_requeue_instead_of_failing(self):
+        local_store = InMemoryCoordinationStore()
+        await local_store.start()
+        quota_manager = ResearchJobManager(
+            QuotaWaitingGraph(),
+            local_store,
+            replace(
+                self.settings,
+                max_active_jobs=0,
+            ),
+        )
+
+        thread_id = "thread-quota"
+        await local_store.set_job_record(
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "queued",
+                "queued_at": 0,
+                "started_at": None,
+                "finished_at": None,
+                "last_error": "",
+                "retry_count": 0,
+                "provider_switch_count": 0,
+                "client_id": "client-1",
+                "current_plan": [],
+                "required_sections": [],
+                "quota_wait_until": None,
+                "quota_retry_after_seconds": 0,
+                "waiting_task_type": "",
+            },
+        )
+
+        await quota_manager._run_job(
+            0,
+            {
+                "kind": "start",
+                "thread_id": thread_id,
+                "initial_state": {
+                    "thread_id": thread_id,
+                    "original_query": "query",
+                    "human_feedback": "",
+                    "research_plan": [],
+                    "required_sections": [],
+                    "pending_tasks": [],
+                    "current_batch": [],
+                    "findings": [],
+                    "evidence_cards": [],
+                    "sources": [],
+                    "discovered_sources": [],
+                    "coverage_tags": [],
+                    "completed_tasks": [],
+                    "gaps": [],
+                    "quality_summary": "",
+                    "evaluation_rounds": 0,
+                    "outline_sections": [],
+                    "section_drafts": {},
+                    "final_report": "",
+                },
+            },
+        )
+
+        waiting_status = await quota_manager.get_status(thread_id)
+        self.assertEqual(waiting_status["status"], "waiting_for_quota")
+        self.assertEqual(waiting_status["waiting_task_type"], "planner")
+
+        replay, queue = await quota_manager.subscribe(thread_id)
+        try:
+            self.assertIn("waiting_for_quota", [event.event for event in replay])
+        finally:
+            await quota_manager.unsubscribe(thread_id, queue)
+
+        await asyncio.sleep(1.1)
+        queued_status = await quota_manager.get_status(thread_id)
+        self.assertEqual(queued_status["status"], "queued")
+        self.assertIsNotNone(await local_store.queue_position(thread_id))
+        await quota_manager.close()
+        await local_store.close()

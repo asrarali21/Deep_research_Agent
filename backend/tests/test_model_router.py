@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agents.sub_agent import SearchTool
 from services.config import get_settings
 from services.coordination import InMemoryCoordinationStore
-from services.model_router import ModelRouter, RequestBudget, coerce_tool_calls_from_text
+from services.model_router import ModelRouter, ProviderBlock, ProviderPolicy, ProviderUnavailableError, RequestBudget, coerce_tool_calls_from_text
 
 
 class FakeProvider:
@@ -169,3 +169,37 @@ class ModelRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(message)
         self.assertEqual(message.tool_calls[0]["name"], "SearchTool")
         self.assertEqual(message.tool_calls[0]["args"]["query"], "cardiac rehab meal plan")
+
+    def test_provider_unavailable_error_waits_for_retryable_provider_even_with_configuration_block(self):
+        quota_policy = ProviderPolicy(
+            name="groq",
+            provider_type="groq",
+            model="llama-3.3-70b-versatile",
+            task_types=("worker_tool_calling",),
+            priority=1,
+            request_limit_per_minute=10,
+            token_limit_per_minute=1000,
+            max_parallel_requests=1,
+        )
+        config_policy = ProviderPolicy(
+            name="gemini",
+            provider_type="gemini",
+            model="gemini-2.5-flash",
+            task_types=("worker_tool_calling",),
+            priority=0,
+            request_limit_per_minute=10,
+            token_limit_per_minute=1000,
+            max_parallel_requests=1,
+        )
+        error = ProviderUnavailableError(
+            task_type="worker_tool_calling",
+            blocked=[
+                ProviderBlock(policy=config_policy, reason="configuration", ttl_seconds=784),
+                ProviderBlock(policy=quota_policy, reason="quota", ttl_seconds=813),
+            ],
+            supported=["gemini", "groq"],
+            message="All providers are temporarily unavailable for task type 'worker_tool_calling'",
+        )
+
+        self.assertTrue(error.should_wait_for_retryable_provider)
+        self.assertEqual(error.retry_after_seconds, 813)

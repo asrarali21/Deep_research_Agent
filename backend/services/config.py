@@ -52,6 +52,7 @@ class Settings:
     min_sources_per_section: int
     provider_cooldown_seconds: int
     quota_cooldown_seconds: int
+    rate_limit_max_cooldown_seconds: int
     transient_retry_base_seconds: float
     transient_retry_jitter_seconds: float
     provider_unavailable_wait_seconds: float
@@ -64,6 +65,17 @@ class Settings:
     groq_request_limit_per_minute: int
     groq_token_limit_per_minute: int
     groq_max_parallel_requests: int
+    groq_secondary_model: str
+    groq_secondary_request_limit_per_minute: int
+    groq_secondary_token_limit_per_minute: int
+    groq_tertiary_model: str
+    groq_tertiary_request_limit_per_minute: int
+    groq_tertiary_token_limit_per_minute: int
+    openrouter_base_url: str
+    openrouter_model: str
+    openrouter_request_limit_per_minute: int
+    openrouter_token_limit_per_minute: int
+    openrouter_max_parallel_requests: int
     huggingface_base_url: str
     huggingface_model: str
     huggingface_request_limit_per_minute: int
@@ -105,24 +117,47 @@ def get_settings() -> Settings:
         min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 5),
         min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 14),
         min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 2),
-        provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 30),
-        quota_cooldown_seconds=_int("QUOTA_COOLDOWN_SECONDS", 900),
+        # --- Provider resilience timers ---
+        # Cooldown after a confirmed rate-limit 429 from the provider API
+        provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 20),
+        # Circuit-breaker for true billing/credit exhaustion (payment required, plan limit)
+        quota_cooldown_seconds=_int("QUOTA_COOLDOWN_SECONDS", 120),
+        # Hard cap on any rate-limit cooldown — prevents runaway stalls
+        rate_limit_max_cooldown_seconds=_int("RATE_LIMIT_MAX_COOLDOWN_SECONDS", 60),
         transient_retry_base_seconds=_float("TRANSIENT_RETRY_BASE_SECONDS", 1.0),
         transient_retry_jitter_seconds=_float("TRANSIENT_RETRY_JITTER_SECONDS", 0.5),
-        provider_unavailable_wait_seconds=_float("PROVIDER_UNAVAILABLE_WAIT_SECONDS", 90.0),
+        # Total time _execute() will keep polling for an available provider before raising
+        provider_unavailable_wait_seconds=_float("PROVIDER_UNAVAILABLE_WAIT_SECONDS", 180.0),
         provider_poll_interval_seconds=_float("PROVIDER_POLL_INTERVAL_SECONDS", 5.0),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        gemini_request_limit_per_minute=_int("GEMINI_REQUEST_LIMIT_PER_MINUTE", 10),
-        gemini_token_limit_per_minute=_int("GEMINI_TOKEN_LIMIT_PER_MINUTE", 80000),
-        gemini_max_parallel_requests=_int("GEMINI_MAX_PARALLEL_REQUESTS", 1),
+        # --- Groq (PRIMARY — fast, reliable free tier: 30 RPM, 15K TPM) ---
         groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        groq_request_limit_per_minute=_int("GROQ_REQUEST_LIMIT_PER_MINUTE", 15),
-        groq_token_limit_per_minute=_int("GROQ_TOKEN_LIMIT_PER_MINUTE", 40000),
+        groq_request_limit_per_minute=_int("GROQ_REQUEST_LIMIT_PER_MINUTE", 14),
+        groq_token_limit_per_minute=_int("GROQ_TOKEN_LIMIT_PER_MINUTE", 15000),
         groq_max_parallel_requests=_int("GROQ_MAX_PARALLEL_REQUESTS", 1),
+        # --- Groq Secondary (separate rate limits — Qwen3 32B) ---
+        groq_secondary_model=os.getenv("GROQ_SECONDARY_MODEL", "qwen/qwen3-32b"),
+        groq_secondary_request_limit_per_minute=_int("GROQ_SECONDARY_REQUEST_LIMIT_PER_MINUTE", 14),
+        groq_secondary_token_limit_per_minute=_int("GROQ_SECONDARY_TOKEN_LIMIT_PER_MINUTE", 15000),
+        # --- Groq Tertiary (separate rate limits — Llama 4 Scout 17B MoE) ---
+        groq_tertiary_model=os.getenv("GROQ_TERTIARY_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+        groq_tertiary_request_limit_per_minute=_int("GROQ_TERTIARY_REQUEST_LIMIT_PER_MINUTE", 14),
+        groq_tertiary_token_limit_per_minute=_int("GROQ_TERTIARY_TOKEN_LIMIT_PER_MINUTE", 15000),
+        # --- Gemini (SECONDARY — flash-lite has 1000 RPD vs 20 RPD for flash) ---
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+        gemini_request_limit_per_minute=_int("GEMINI_REQUEST_LIMIT_PER_MINUTE", 15),
+        gemini_token_limit_per_minute=_int("GEMINI_TOKEN_LIMIT_PER_MINUTE", 250000),
+        gemini_max_parallel_requests=_int("GEMINI_MAX_PARALLEL_REQUESTS", 1),
+        # --- OpenRouter (free model auto-router picks best available free model) ---
+        openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
+        openrouter_request_limit_per_minute=_int("OPENROUTER_REQUEST_LIMIT_PER_MINUTE", 10),
+        openrouter_token_limit_per_minute=_int("OPENROUTER_TOKEN_LIMIT_PER_MINUTE", 30000),
+        openrouter_max_parallel_requests=_int("OPENROUTER_MAX_PARALLEL_REQUESTS", 2),
+        # --- HuggingFace (ENABLED — free API, serves as additional fallback) ---
         huggingface_base_url=os.getenv("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1"),
-        huggingface_model=os.getenv("HUGGINGFACE_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
+        huggingface_model=os.getenv("HUGGINGFACE_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
         huggingface_request_limit_per_minute=_int("HUGGINGFACE_REQUEST_LIMIT_PER_MINUTE", 10),
         huggingface_token_limit_per_minute=_int("HUGGINGFACE_TOKEN_LIMIT_PER_MINUTE", 30000),
         huggingface_max_parallel_requests=_int("HUGGINGFACE_MAX_PARALLEL_REQUESTS", 1),
-        enable_huggingface_router=_bool("ENABLE_HUGGINGFACE_ROUTER", False),
+        enable_huggingface_router=_bool("ENABLE_HUGGINGFACE_ROUTER", True),
     )

@@ -1,9 +1,28 @@
+import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# ---------------------------------------------------------------------------
+# Logging — production-grade setup for all service modules
+# ---------------------------------------------------------------------------
+_LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)-14s | %(message)s"
+_LOG_DATE_FORMAT = "%H:%M:%S"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=_LOG_FORMAT,
+    datefmt=_LOG_DATE_FORMAT,
+    stream=sys.stdout,
+    force=True,
+)
+# Silence noisy third-party loggers
+for _noisy in ("httpcore", "httpx", "urllib3", "asyncio", "langchain", "langchain_core"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg_pool import AsyncConnectionPool

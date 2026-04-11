@@ -53,6 +53,8 @@ export function useResearchSession() {
       error: state.error,
       rateLimitResetAt: state.rateLimitResetAt,
       queueRetryAt: state.queueRetryAt,
+      quotaWaitUntil: state.quotaWaitUntil,
+      waitingTaskType: state.waitingTaskType,
       isStreaming: state.isStreaming,
       isThinkingOpen: state.isThinkingOpen,
       isSourcesOpenMobile: state.isSourcesOpenMobile,
@@ -79,6 +81,8 @@ export function useResearchSession() {
     state.error,
     state.rateLimitResetAt,
     state.queueRetryAt,
+    state.quotaWaitUntil,
+    state.waitingTaskType,
     state.isStreaming,
     state.isThinkingOpen,
     state.isSourcesOpenMobile,
@@ -93,7 +97,7 @@ export function useResearchSession() {
     enabled:
       Boolean(state.threadId) &&
       !state.isStreaming &&
-      ["queued", "running", "paused", "stopped"].includes(state.status),
+      ["queued", "running", "waiting_for_quota", "paused", "stopped"].includes(state.status),
     refetchInterval: 2_000,
     retry: false,
   });
@@ -175,6 +179,14 @@ export function useResearchSession() {
         return;
       }
 
+      if (state.threadId && ["queued", "running", "waiting_for_quota"].includes(state.status)) {
+        useResearchSessionStore.setState({
+          status: state.status,
+          error: apiError?.message ?? state.error,
+        });
+        return;
+      }
+
       if (!state.rawReport) {
         useResearchSessionStore.setState({
           status: state.stoppedByUser ? "stopped" : "failed",
@@ -247,7 +259,10 @@ export function useResearchSession() {
     clearSessionSnapshot();
   }, [state]);
 
-  const canSubmit = useMemo(() => !state.isStreaming && state.status !== "queued" && state.status !== "running", [state]);
+  const canSubmit = useMemo(
+    () => !state.isStreaming && !["queued", "running", "waiting_for_quota"].includes(state.status),
+    [state],
+  );
 
   return {
     state,

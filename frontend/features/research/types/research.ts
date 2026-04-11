@@ -2,6 +2,7 @@ export type SessionStatus =
   | "idle"
   | "queued"
   | "running"
+  | "waiting_for_quota"
   | "paused"
   | "done"
   | "failed"
@@ -9,7 +10,7 @@ export type SessionStatus =
 
 export type ResearchStatus = {
   thread_id: string;
-  status: "queued" | "running" | "paused" | "done" | "failed";
+  status: "queued" | "running" | "waiting_for_quota" | "paused" | "done" | "failed";
   queue_position: number | null;
   retry_count: number;
   provider_switch_count: number;
@@ -17,17 +18,32 @@ export type ResearchStatus = {
   required_sections?: string[];
   extracted_facts_count: number;
   evidence_card_count?: number;
+  quota_wait_until?: number | null;
+  quota_retry_after_seconds?: number;
+  waiting_task_type?: string;
   last_error: string;
 };
 
 export type QueuedEvent = {
   event: "queued";
-  data: { thread_id: string; status: "queued"; resume?: true };
+  data: { thread_id: string; status: "queued"; resume?: true; reason?: string };
 };
 
 export type StartedEvent = {
   event: "started";
   data: { thread_id: string; status: "running"; worker: number };
+};
+
+export type WaitingForQuotaEvent = {
+  event: "waiting_for_quota";
+  data: {
+    thread_id: string;
+    status: "waiting_for_quota";
+    task_type: string;
+    retry_after_seconds: number;
+    available_at: number;
+    error: string;
+  };
 };
 
 export type PlanEvent = {
@@ -111,6 +127,7 @@ export type HeartbeatEvent = {
 export type ResearchEvent =
   | QueuedEvent
   | StartedEvent
+  | WaitingForQuotaEvent
   | PlanEvent
   | AgentEvent
   | SourceBatchEvent
@@ -162,6 +179,8 @@ export type ResearchSessionState = {
   error?: string;
   rateLimitResetAt?: number;
   queueRetryAt?: number;
+  quotaWaitUntil?: number;
+  waitingTaskType?: string;
   isStreaming: boolean;
   isThinkingOpen: boolean;
   isSourcesOpenMobile: boolean;

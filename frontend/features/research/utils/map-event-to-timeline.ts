@@ -19,9 +19,22 @@ function makeTimelineItem(
 export function mapEventToTimeline(event: ResearchEvent): TimelineItem | null {
   switch (event.event) {
     case "queued":
-      return makeTimelineItem("queued", event.data.resume ? "Re-queued after feedback" : "Queued for research");
+      return makeTimelineItem(
+        "queued",
+        event.data.reason === "quota_wait_complete"
+          ? "Re-queued after provider quota reset"
+          : event.data.resume
+            ? "Re-queued after feedback"
+            : "Queued for research",
+      );
     case "started":
       return makeTimelineItem("system", "Research worker started", `Worker ${event.data.worker} claimed the job.`);
+    case "waiting_for_quota":
+      return makeTimelineItem(
+        "system",
+        "Waiting for provider quota reset",
+        `The ${event.data.task_type} stage will resume automatically in about ${event.data.retry_after_seconds}s.`,
+      );
     case "plan":
       return makeTimelineItem(
         "plan",

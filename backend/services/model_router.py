@@ -1,5 +1,17 @@
+"""
+Model Router — production-grade multi-provider LLM gateway.
+
+Routes requests through available providers with:
+ • Per-provider local quota guards aligned to real API limits
+ • Smart error classification (rate-limit ≠ quota exhaustion)
+ • Capped cooldown timers to prevent runaway stalls
+ • Structured logging for every provider decision
+ • Automatic fallback chain: Gemini → OpenRouter → Groq → HuggingFace
+"""
+
 import asyncio
 import json
+import logging
 import os
 import random
 import re
@@ -17,6 +29,12 @@ from pydantic import ValidationError
 from services.config import Settings
 from services.coordination import CoordinationStore
 
+logger = logging.getLogger("model_router")
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 @dataclass(slots=True)
 class RequestBudget:
@@ -69,6 +87,37 @@ class ProviderBlock:
     details: dict[str, Any] | None = None
 
 
+class ProviderUnavailableError(RuntimeError):
+    def __init__(self, task_type: str, blocked: list[ProviderBlock], supported: list[str], message: str) -> None:
+        super().__init__(message)
+        self.task_type = task_type
+        self.blocked = blocked
+        self.supported = supported
+
+    @property
+    def retry_after_seconds(self) -> int:
+        positive_ttls = [block.ttl_seconds for block in self.temporarily_blocked if block.ttl_seconds > 0]
+        if not positive_ttls:
+            positive_ttls = [block.ttl_seconds for block in self.blocked if block.ttl_seconds > 0]
+        return max(1, min(positive_ttls)) if positive_ttls else 1
+
+    @property
+    def reasons(self) -> list[str]:
+        return [block.reason for block in self.blocked]
+
+    @property
+    def temporarily_blocked(self) -> list[ProviderBlock]:
+        return [block for block in self.blocked if block.reason in {"quota", "local_quota_guard", "rate_limit"}]
+
+    @property
+    def has_configuration_only_failure(self) -> bool:
+        return bool(self.blocked) and not self.temporarily_blocked
+
+    @property
+    def should_wait_for_retryable_provider(self) -> bool:
+        return bool(self.temporarily_blocked)
+
+
 class ProviderClient(Protocol):
     async def generate_text(self, messages: list[BaseMessage], budget: RequestBudget) -> AIMessage:
         ...
@@ -84,6 +133,10 @@ class ProviderClient(Protocol):
     ) -> AIMessage:
         ...
 
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 def estimate_tokens_from_messages(messages: list[BaseMessage]) -> int:
     total_chars = 0
@@ -126,21 +179,66 @@ def trim_messages_for_budget(messages: list[BaseMessage], budget: RequestBudget)
 
 
 def classify_exception(error: Exception) -> str:
+    """Classify a provider error into an actionable category.
+
+    Categories:
+      - configuration: wrong model, 404 — provider will never work until config is fixed.
+      - quota: true billing/credit exhaustion — provider won't work until plan is upgraded.
+      - rate_limit: per-minute/per-day throttle — provider recovers in seconds to minutes.
+      - transient: server errors, timeouts — immediate retry is reasonable.
+      - unknown: fallback.
+
+    IMPORTANT: Gemini returns "Resource has been exhausted (e.g. check quota)" for
+    standard per-minute rate limits.  That is a *rate_limit*, NOT a billing exhaustion.
+    We must check for true billing terms FIRST and only if none match, fall through to
+    rate-limit detection which deliberately includes "exhausted" and "quota" when they
+    appear alongside 429/rate-limit signals.
+    """
     error_text = str(error).lower()
-    if any(term in error_text for term in ("not_found", "404", "model is not found", "models/", "not supported for generatecontent", "unsupported model")):
+
+    # --- Configuration errors (permanent until config change) ---
+    if any(term in error_text for term in (
+        "not_found", "404", "model is not found", "models/",
+        "not supported for generatecontent", "unsupported model",
+        "permission denied", "403",
+    )):
         return "configuration"
-    if any(term in error_text for term in ("rate limit", "429", "too many requests", "throttle")):
-        if any(term in error_text for term in ("quota", "credit", "billing", "exhausted")):
-            return "quota"
-        return "rate_limit"
-    if any(term in error_text for term in ("quota", "credits depleted", "billing", "exhausted")):
+
+    # --- True billing / credit exhaustion (needs plan upgrade) ---
+    #     These terms ONLY appear when billing is the real problem.
+    billing_terms = (
+        "credits depleted", "payment required", "402",
+        "plan limit", "free tier exceeded", "subscription required",
+        "billing not enabled", "billing account", "spending limit",
+    )
+    if any(term in error_text for term in billing_terms):
         return "quota"
-    if any(term in error_text for term in ("timeout", "temporarily unavailable", "unavailable", "503", "500", "connection")):
+
+    # --- Rate limit (per-minute or per-day throttle, recovers automatically) ---
+    #     This intentionally catches Gemini's "resource exhausted (check quota)"
+    #     because that message is a standard RPM throttle, not a billing issue.
+    rate_limit_terms = (
+        "rate limit", "rate_limit", "429", "too many requests", "throttle",
+        "resource exhausted", "resource has been exhausted",
+        "quota exceeded", "requests per minute", "tokens per minute",
+        "rpm", "tpm", "retry after",
+    )
+    if any(term in error_text for term in rate_limit_terms):
+        return "rate_limit"
+
+    # --- Transient server errors ---
+    if any(term in error_text for term in (
+        "timeout", "temporarily unavailable", "unavailable",
+        "503", "500", "502", "504", "connection",
+        "internal server error", "service unavailable",
+    )):
         return "transient"
+
     return "unknown"
 
 
 def parse_retry_after_seconds(error: Exception) -> int:
+    """Extract Retry-After from HTTP response headers or error text."""
     response = getattr(error, "response", None)
     if response is not None:
         headers = getattr(response, "headers", {}) or {}
@@ -179,9 +277,13 @@ def _extract_failed_generation_texts(error: Exception) -> list[str]:
     for payload in _extract_error_payload(error):
         if isinstance(payload, dict):
             nested = payload.get("error", payload)
-            failed_generation = nested.get("failed_generation")
-            if isinstance(failed_generation, str):
-                texts.append(failed_generation)
+            # Guard: nested might be a string like {"error": "some message"}
+            if isinstance(nested, dict):
+                failed_generation = nested.get("failed_generation")
+                if isinstance(failed_generation, str):
+                    texts.append(failed_generation)
+            elif isinstance(nested, str):
+                texts.append(nested)
         elif isinstance(payload, str):
             texts.append(payload)
     return texts
@@ -300,11 +402,23 @@ async def repair_tool_call_with_plain_json(
     return coerce_tool_calls_from_text(_extract_text_content(response.content), tools)
 
 
+# ---------------------------------------------------------------------------
+# Provider implementations
+# ---------------------------------------------------------------------------
+
 class GeminiProvider:
     def __init__(self, policy: ProviderPolicy, api_key: str) -> None:
         self._policy = policy
         self._api_key = api_key
-        self._llm = ChatGoogleGenerativeAI(model=policy.model, google_api_key=api_key, temperature=0)
+        # max_retries=0 disables the SDK's internal retry loop (which wastes 30-40s
+        # retrying 429s).  Our ModelRouter handles retries at a higher level and can
+        # switch providers instead of burning time on the same exhausted provider.
+        self._llm = ChatGoogleGenerativeAI(
+            model=policy.model,
+            google_api_key=api_key,
+            temperature=0,
+            max_retries=0,
+        )
 
     async def generate_text(self, messages: list[BaseMessage], budget: RequestBudget) -> AIMessage:
         return await self._llm.ainvoke(trim_messages_for_budget(messages, budget))
@@ -356,13 +470,23 @@ class GroqProvider:
             raise
 
 
-class HuggingFaceProvider:
+class OpenRouterProvider:
+    """OpenRouter provider — uses the OpenAI-compatible API with a wide model catalog."""
+
     def __init__(self, policy: ProviderPolicy, api_key: str) -> None:
+        self._policy = policy
+        # max_retries=0: let our ModelRouter handle retries instead of the SDK
+        # wasting 7+ seconds retrying 429s internally.
         self._llm = ChatOpenAI(
             model=policy.model,
             api_key=api_key,
             base_url=policy.base_url,
             temperature=0,
+            max_retries=0,
+            default_headers={
+                "HTTP-Referer": "https://deep-research-agent.local",
+                "X-Title": "Deep Research Agent",
+            },
         )
 
     async def generate_text(self, messages: list[BaseMessage], budget: RequestBudget) -> AIMessage:
@@ -393,6 +517,51 @@ class HuggingFaceProvider:
                 return repaired
             raise
 
+
+class HuggingFaceProvider:
+    def __init__(self, policy: ProviderPolicy, api_key: str) -> None:
+        # max_retries=0: let our ModelRouter handle retries.
+        self._llm = ChatOpenAI(
+            model=policy.model,
+            api_key=api_key,
+            base_url=policy.base_url,
+            temperature=0,
+            max_retries=0,
+        )
+
+    async def generate_text(self, messages: list[BaseMessage], budget: RequestBudget) -> AIMessage:
+        return await self._llm.ainvoke(trim_messages_for_budget(messages, budget))
+
+    async def generate_structured(self, schema: type, messages: list[BaseMessage], budget: RequestBudget) -> Any:
+        return await self._llm.with_structured_output(schema).ainvoke(trim_messages_for_budget(messages, budget))
+
+    async def generate_tool_calling(
+        self,
+        messages: list[BaseMessage],
+        tools: list[type],
+        budget: RequestBudget,
+    ) -> AIMessage:
+        trimmed_messages = trim_messages_for_budget(messages, budget)
+        try:
+            # HuggingFace router doesn't support tool_choice="any", use plain bind_tools
+            return await self._llm.bind_tools(tools).ainvoke(trimmed_messages)
+        except Exception as error:
+            for text in _extract_failed_generation_texts(error):
+                recovered = coerce_tool_calls_from_text(text, tools)
+                if recovered is not None:
+                    return recovered
+            try:
+                repaired = await repair_tool_call_with_plain_json(self._llm, trimmed_messages, tools, budget)
+            except Exception:
+                repaired = None
+            if repaired is not None:
+                return repaired
+            raise
+
+
+# ---------------------------------------------------------------------------
+# ModelRouter
+# ---------------------------------------------------------------------------
 
 class ModelRouter:
     def __init__(
@@ -426,24 +595,12 @@ class ModelRouter:
 
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         groq_api_key = os.environ.get("GROQ_API_KEY")
+        openrouter_api_key = os.environ.get("OPEN_ROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         hf_api_key = os.environ.get("HUGGINGFACE_API_KEY")
 
         policies: list[ProviderPolicy] = []
-        if gemini_api_key:
-            policies.append(
-                ProviderPolicy(
-                    name="gemini",
-                    provider_type="gemini",
-                    model=self._settings.gemini_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
-                    priority=0,
-                    request_limit_per_minute=self._settings.gemini_request_limit_per_minute,
-                    token_limit_per_minute=self._settings.gemini_token_limit_per_minute,
-                    max_parallel_requests=self._settings.gemini_max_parallel_requests,
-                )
-            )
-            self._clients["gemini"] = GeminiProvider(policies[-1], gemini_api_key)
 
+        # Priority 0 — Groq Primary (llama-3.3-70b — best quality)
         if groq_api_key:
             policies.append(
                 ProviderPolicy(
@@ -451,7 +608,7 @@ class ModelRouter:
                     provider_type="groq",
                     model=self._settings.groq_model,
                     task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
-                    priority=1,
+                    priority=0,
                     request_limit_per_minute=self._settings.groq_request_limit_per_minute,
                     token_limit_per_minute=self._settings.groq_token_limit_per_minute,
                     max_parallel_requests=self._settings.groq_max_parallel_requests,
@@ -459,14 +616,80 @@ class ModelRouter:
             )
             self._clients["groq"] = GroqProvider(policies[-1], groq_api_key)
 
+        # Priority 0 — Groq Secondary (qwen3-32b — separate rate limits)
+        if groq_api_key and self._settings.groq_secondary_model:
+            policies.append(
+                ProviderPolicy(
+                    name="groq_secondary",
+                    provider_type="groq",
+                    model=self._settings.groq_secondary_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=0,
+                    request_limit_per_minute=self._settings.groq_secondary_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.groq_secondary_token_limit_per_minute,
+                    max_parallel_requests=1,
+                )
+            )
+            self._clients["groq_secondary"] = GroqProvider(policies[-1], groq_api_key)
+
+        # Priority 0 — Groq Tertiary (llama-4-scout — separate rate limits)
+        if groq_api_key and self._settings.groq_tertiary_model:
+            policies.append(
+                ProviderPolicy(
+                    name="groq_tertiary",
+                    provider_type="groq",
+                    model=self._settings.groq_tertiary_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=0,
+                    request_limit_per_minute=self._settings.groq_tertiary_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.groq_tertiary_token_limit_per_minute,
+                    max_parallel_requests=1,
+                )
+            )
+            self._clients["groq_tertiary"] = GroqProvider(policies[-1], groq_api_key)
+
+        # Priority 1 — Gemini (high quality, limited daily quota on free tier)
+        if gemini_api_key:
+            policies.append(
+                ProviderPolicy(
+                    name="gemini",
+                    provider_type="gemini",
+                    model=self._settings.gemini_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=1,
+                    request_limit_per_minute=self._settings.gemini_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.gemini_token_limit_per_minute,
+                    max_parallel_requests=self._settings.gemini_max_parallel_requests,
+                )
+            )
+            self._clients["gemini"] = GeminiProvider(policies[-1], gemini_api_key)
+
+        # Priority 2 — OpenRouter (free shared models, may be rate-limited upstream)
+        if openrouter_api_key:
+            policies.append(
+                ProviderPolicy(
+                    name="openrouter",
+                    provider_type="openrouter",
+                    model=self._settings.openrouter_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=2,
+                    request_limit_per_minute=self._settings.openrouter_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.openrouter_token_limit_per_minute,
+                    max_parallel_requests=self._settings.openrouter_max_parallel_requests,
+                    base_url=self._settings.openrouter_base_url,
+                )
+            )
+            self._clients["openrouter"] = OpenRouterProvider(policies[-1], openrouter_api_key)
+
+        # Priority 3 — HuggingFace (free API, additional fallback)
         if hf_api_key and self._settings.enable_huggingface_router:
             policies.append(
                 ProviderPolicy(
                     name="huggingface",
                     provider_type="huggingface",
                     model=self._settings.huggingface_model,
-                    task_types=("planner", "evaluator", "synthesis"),
-                    priority=2,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=3,
                     request_limit_per_minute=self._settings.huggingface_request_limit_per_minute,
                     token_limit_per_minute=self._settings.huggingface_token_limit_per_minute,
                     max_parallel_requests=self._settings.huggingface_max_parallel_requests,
@@ -480,6 +703,14 @@ class ModelRouter:
                 policy=policy,
                 semaphore=asyncio.Semaphore(policy.max_parallel_requests),
             )
+
+        # Log registered providers at startup
+        provider_summary = ", ".join(
+            f"{p.name}({p.model}, pri={p.priority})" for p in policies
+        ) or "NONE"
+        logger.info("🚀 ModelRouter initialized — providers: %s", provider_summary)
+
+    # --- Public API ---
 
     async def generate_text(
         self,
@@ -510,6 +741,8 @@ class ModelRouter:
     ) -> AIMessage:
         return await self._execute(task_type, "tool_calling", messages, budget, trace_id, schema=None, tools=tools)
 
+    # --- Core execution loop ---
+
     async def _execute(
         self,
         task_type: str,
@@ -522,15 +755,49 @@ class ModelRouter:
     ) -> Any:
         started_at = time.monotonic()
         last_error: Exception | None = None
+        attempt_number = 0
 
         while time.monotonic() - started_at <= self._settings.provider_unavailable_wait_seconds:
+            attempt_number += 1
             candidates, blocked = await self._select_candidates(task_type)
+
             if not candidates:
-                last_error = RuntimeError(self._format_provider_unavailable_message(task_type, blocked))
+                supported = [
+                    state.policy.name
+                    for state in self._states.values()
+                    if task_type in state.policy.task_types and state.policy.enabled
+                ]
+                last_error = ProviderUnavailableError(
+                    task_type=task_type,
+                    blocked=blocked,
+                    supported=supported,
+                    message=self._format_provider_unavailable_message(task_type, blocked),
+                )
+                if (
+                    blocked
+                    and last_error.should_wait_for_retryable_provider
+                    and last_error.retry_after_seconds > self._settings.provider_unavailable_wait_seconds
+                ):
+                    logger.error(
+                        "🛑 [%s] All providers blocked beyond wait limit (%ds > %ds) — failing immediately",
+                        task_type, last_error.retry_after_seconds,
+                        int(self._settings.provider_unavailable_wait_seconds),
+                    )
+                    raise last_error
+
+                wait_time = self._next_provider_check_delay(blocked)
                 remaining = self._settings.provider_unavailable_wait_seconds - (time.monotonic() - started_at)
                 if remaining <= 0:
                     break
-                await asyncio.sleep(min(self._next_provider_check_delay(blocked), remaining))
+
+                blocked_summary = ", ".join(
+                    f"{b.policy.name}:{b.reason}({b.ttl_seconds}s)" for b in blocked
+                ) or "none"
+                logger.warning(
+                    "⏳ [%s] No available providers (attempt %d) — blocked: [%s] — rechecking in %.0fs",
+                    task_type, attempt_number, blocked_summary, min(wait_time, remaining),
+                )
+                await asyncio.sleep(min(wait_time, remaining))
                 continue
 
             for index, state in enumerate(candidates):
@@ -548,6 +815,11 @@ class ModelRouter:
                 if isinstance(result, Exception):
                     last_error = result
                     if index < len(candidates) - 1:
+                        next_provider = candidates[index + 1].policy.name
+                        logger.info(
+                            "🔀 [%s] Switching from %s → %s for %s",
+                            trace_id[:8], state.policy.name, next_provider, task_type,
+                        )
                         await self._coordination_store.increment_job_metric(trace_id, "provider_switch_count", 1)
                     continue
                 return result
@@ -603,6 +875,8 @@ class ModelRouter:
     ) -> Any | Exception:
         policy = state.policy
         token_cost = estimate_tokens_from_messages(trim_messages_for_budget(messages, budget)) + max(0, budget.max_output_tokens)
+
+        # Local quota guard — prevent sending requests we know will 429
         reservation = await self._coordination_store.reserve_quota(
             key=f"provider:{policy.name}",
             request_cost=1,
@@ -612,55 +886,122 @@ class ModelRouter:
             window_seconds=60,
         )
         if not reservation.allowed:
+            # Cap local guard cooldown to the rate-limit max so it never exceeds 60s
+            guard_ttl = min(reservation.retry_after_seconds, self._settings.rate_limit_max_cooldown_seconds)
             await self._coordination_store.set_json(
                 f"provider:cooldown:{policy.name}",
                 {"reason": "local_quota_guard"},
-                ttl_seconds=reservation.retry_after_seconds,
+                ttl_seconds=guard_ttl,
+            )
+            logger.warning(
+                "⚠️  [%s/%s] Local quota guard — %d/%d reqs, %d/%d tokens used — cooldown %ds",
+                policy.name, policy.model,
+                reservation.requests_used, policy.request_limit_per_minute,
+                reservation.tokens_used, policy.token_limit_per_minute,
+                guard_ttl,
             )
             return RuntimeError(f"{policy.name} local quota guard triggered.")
 
+        request_start = time.monotonic()
         async with state.semaphore:
+            logger.info(
+                "📡 [%s/%s] %s request starting (mode=%s, budget=%d chars / %d tokens)",
+                policy.name, policy.model, mode, mode,
+                budget.max_input_chars, budget.max_output_tokens,
+            )
             try:
                 if mode == "text":
-                    return await client.generate_text(messages, budget)
-                if mode == "structured":
-                    return await client.generate_structured(schema, messages, budget)
-                if mode == "tool_calling":
-                    return await client.generate_tool_calling(messages, tools or [], budget)
-                raise ValueError(f"Unsupported model router mode: {mode}")
+                    result = await client.generate_text(messages, budget)
+                elif mode == "structured":
+                    result = await client.generate_structured(schema, messages, budget)
+                elif mode == "tool_calling":
+                    result = await client.generate_tool_calling(messages, tools or [], budget)
+                else:
+                    raise ValueError(f"Unsupported model router mode: {mode}")
+
+                elapsed_ms = int((time.monotonic() - request_start) * 1000)
+                logger.info(
+                    "✅ [%s/%s] %s completed in %dms",
+                    policy.name, policy.model, mode, elapsed_ms,
+                )
+                return result
+
             except Exception as error:
+                elapsed_ms = int((time.monotonic() - request_start) * 1000)
+                classification = classify_exception(error)
+                logger.error(
+                    "❌ [%s/%s] %s failed after %dms — class=%s — %s",
+                    policy.name, policy.model, mode, elapsed_ms,
+                    classification, str(error)[:300],
+                )
+
                 decision = await self._build_retry_decision(policy.name, error)
+
+                # One retry on same provider for transient errors
                 if decision.retry_same_provider:
                     await self._coordination_store.increment_job_metric(trace_id, "retry_count", 1)
+                    logger.info(
+                        "🔄 [%s] Retrying same provider in %.1fs (reason=%s)",
+                        policy.name, decision.delay_seconds, decision.reason,
+                    )
                     await asyncio.sleep(decision.delay_seconds)
                     try:
                         if mode == "text":
-                            return await client.generate_text(messages, budget)
-                        if mode == "structured":
-                            return await client.generate_structured(schema, messages, budget)
-                        return await client.generate_tool_calling(messages, tools or [], budget)
+                            result = await client.generate_text(messages, budget)
+                        elif mode == "structured":
+                            result = await client.generate_structured(schema, messages, budget)
+                        else:
+                            result = await client.generate_tool_calling(messages, tools or [], budget)
+
+                        logger.info("✅ [%s/%s] Retry succeeded", policy.name, policy.model)
+                        return result
                     except Exception as second_error:
+                        second_classification = classify_exception(second_error)
+                        logger.error(
+                            "❌ [%s/%s] Retry also failed — class=%s — %s",
+                            policy.name, policy.model,
+                            second_classification, str(second_error)[:300],
+                        )
                         error = second_error
                         decision = await self._build_retry_decision(policy.name, second_error)
 
+                # Apply cooldown/circuit-breaker based on error class
                 if decision.reason == "rate_limit":
-                    ttl = max(1, int(decision.delay_seconds))
+                    # Use Retry-After header if available, else use configured cooldown, cap it
+                    header_ttl = parse_retry_after_seconds(error)
+                    ttl = header_ttl or max(1, int(decision.delay_seconds))
+                    ttl = min(ttl, self._settings.rate_limit_max_cooldown_seconds)
                     await self._coordination_store.set_json(
                         f"provider:cooldown:{policy.name}",
                         {"reason": "rate_limit"},
                         ttl_seconds=ttl,
                     )
+                    logger.warning(
+                        "🚫 [%s] Rate-limited — cooldown %ds (header=%ds, configured=%ds, cap=%ds)",
+                        policy.name, ttl, header_ttl, self._settings.provider_cooldown_seconds,
+                        self._settings.rate_limit_max_cooldown_seconds,
+                    )
                 elif decision.reason == "quota":
+                    ttl = self._settings.quota_cooldown_seconds
                     await self._coordination_store.set_json(
                         f"provider:circuit:{policy.name}",
                         {"reason": "quota"},
-                        ttl_seconds=self._settings.quota_cooldown_seconds,
+                        ttl_seconds=ttl,
+                    )
+                    logger.error(
+                        "🚫 [%s] Billing/quota exhausted — circuit-breaker %ds",
+                        policy.name, ttl,
                     )
                 elif decision.reason == "configuration":
+                    ttl = self._settings.quota_cooldown_seconds
                     await self._coordination_store.set_json(
                         f"provider:circuit:{policy.name}",
-                        {"reason": "configuration", "error": str(error)},
-                        ttl_seconds=self._settings.quota_cooldown_seconds,
+                        {"reason": "configuration", "error": str(error)[:500]},
+                        ttl_seconds=ttl,
+                    )
+                    logger.error(
+                        "🚫 [%s] Configuration error (bad model/API key) — circuit-breaker %ds — %s",
+                        policy.name, ttl, str(error)[:200],
                     )
 
                 return error
@@ -669,6 +1010,8 @@ class ModelRouter:
         classification = classify_exception(error)
         if classification == "rate_limit":
             retry_after = parse_retry_after_seconds(error) or self._settings.provider_cooldown_seconds
+            # Cap rate-limit delays so they never stall the system
+            retry_after = min(retry_after, self._settings.rate_limit_max_cooldown_seconds)
             return RetryDecision(
                 retry_same_provider=False,
                 switch_provider=True,
