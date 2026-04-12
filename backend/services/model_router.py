@@ -188,43 +188,49 @@ def classify_exception(error: Exception) -> str:
       - transient: server errors, timeouts — immediate retry is reasonable.
       - unknown: fallback.
 
-    IMPORTANT: Gemini returns "Resource has been exhausted (e.g. check quota)" for
-    standard per-minute rate limits.  That is a *rate_limit*, NOT a billing exhaustion.
-    We must check for true billing terms FIRST and only if none match, fall through to
-    rate-limit detection which deliberately includes "exhausted" and "quota" when they
-    appear alongside 429/rate-limit signals.
+    ORDER MATTERS: Rate-limit must be checked BEFORE configuration because provider
+    error messages often contain model paths like 'models/llama-3.3-70b...' alongside
+    rate-limit information.  If configuration were checked first, the 'models/' substring
+    would cause a false match.
     """
     error_text = str(error).lower()
 
-    # --- Configuration errors (permanent until config change) ---
-    if any(term in error_text for term in (
-        "not_found", "404", "model is not found", "models/",
-        "not supported for generatecontent", "unsupported model",
-        "permission denied", "403",
-    )):
-        return "configuration"
-
-    # --- True billing / credit exhaustion (needs plan upgrade) ---
-    #     These terms ONLY appear when billing is the real problem.
-    billing_terms = (
-        "credits depleted", "payment required", "402",
-        "plan limit", "free tier exceeded", "subscription required",
-        "billing not enabled", "billing account", "spending limit",
-    )
-    if any(term in error_text for term in billing_terms):
-        return "quota"
-
-    # --- Rate limit (per-minute or per-day throttle, recovers automatically) ---
-    #     This intentionally catches Gemini's "resource exhausted (check quota)"
-    #     because that message is a standard RPM throttle, not a billing issue.
+    # --- Rate limit FIRST (per-minute or per-day throttle, recovers automatically) ---
+    #     Check this before configuration because rate-limit errors from providers
+    #     often contain model names like 'models/xxx' which would false-match config.
     rate_limit_terms = (
         "rate limit", "rate_limit", "429", "too many requests", "throttle",
         "resource exhausted", "resource has been exhausted",
         "quota exceeded", "requests per minute", "tokens per minute",
-        "rpm", "tpm", "retry after",
+        "rpm", "tpm", "retry after", "too many tokens",
     )
     if any(term in error_text for term in rate_limit_terms):
         return "rate_limit"
+
+    # --- True billing / credit exhaustion (needs plan upgrade) ---
+    billing_terms = (
+        "credits depleted", "payment required", "402",
+        "plan limit", "free tier exceeded", "subscription required",
+        "billing not enabled", "billing account", "spending limit",
+        "purchase more", "insufficient credits", "usage limit",
+    )
+    if any(term in error_text for term in billing_terms):
+        return "quota"
+
+    # --- Configuration errors (permanent until config change) ---
+    #     More specific patterns to avoid false positives with model name substrings.
+    if any(term in error_text for term in (
+        "not_found", "model is not found", "model not found",
+        "not supported for generatecontent", "unsupported model",
+        "invalid model", "unknown model", "does not exist",
+    )):
+        return "configuration"
+    # HTTP 404 specifically (but NOT if it's a 429 or other rate-limit context)
+    if "404" in error_text and "rate" not in error_text:
+        return "configuration"
+    # 403 forbidden (but not if it's a rate-limit 403)
+    if ("permission denied" in error_text or "403" in error_text) and "rate" not in error_text:
+        return "configuration"
 
     # --- Transient server errors ---
     if any(term in error_text for term in (
