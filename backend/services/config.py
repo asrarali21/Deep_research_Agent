@@ -88,11 +88,12 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        # --- Task limits (ceilings — the planner prompt decides actual count dynamically) ---
         max_initial_tasks=_int("MAX_INITIAL_TASKS", 4),
         max_active_sub_agents_per_job=_int("MAX_ACTIVE_SUB_AGENTS_PER_JOB", 1),
         max_gap_tasks_per_round=_int("MAX_GAP_TASKS_PER_ROUND", 3),
-        max_gap_rounds=_int("MAX_GAP_ROUNDS", 3),
-        max_sub_agent_iterations=_int("MAX_SUB_AGENT_ITERATIONS", 8),
+        max_gap_rounds=_int("MAX_GAP_ROUNDS", 2),
+        max_sub_agent_iterations=_int("MAX_SUB_AGENT_ITERATIONS", 6),
         max_active_jobs=_int("MAX_ACTIVE_JOBS", 2),
         max_queue_depth=_int("MAX_QUEUE_DEPTH", 25),
         queue_wait_timeout_seconds=_float("QUEUE_WAIT_TIMEOUT_SECONDS", 1.0),
@@ -101,22 +102,25 @@ def get_settings() -> Settings:
         queue_full_retry_after_seconds=_int("QUEUE_FULL_RETRY_AFTER_SECONDS", 5),
         search_cache_ttl_seconds=_int("SEARCH_CACHE_TTL_SECONDS", 900),
         scrape_cache_ttl_seconds=_int("SCRAPE_CACHE_TTL_SECONDS", 86400),
-        working_summary_char_limit=_int("WORKING_SUMMARY_CHAR_LIMIT", 8000),
-        recent_message_count=_int("RECENT_MESSAGE_COUNT", 6),
-        tool_result_char_limit=_int("TOOL_RESULT_CHAR_LIMIT", 8000),
-        search_result_limit=_int("SEARCH_RESULT_LIMIT", 12),
-        planner_input_char_budget=_int("PLANNER_INPUT_CHAR_BUDGET", 16000),
-        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 24000),
-        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 36000),
-        section_draft_output_tokens=_int("SECTION_DRAFT_OUTPUT_TOKENS", 1200),
-        final_report_output_tokens=_int("FINAL_REPORT_OUTPUT_TOKENS", 4200),
-        min_scraped_sources_per_task=_int("MIN_SCRAPED_SOURCES_PER_TASK", 3),
-        min_evidence_cards_per_task=_int("MIN_EVIDENCE_CARDS_PER_TASK", 5),
+        working_summary_char_limit=_int("WORKING_SUMMARY_CHAR_LIMIT", 6000),
+        recent_message_count=_int("RECENT_MESSAGE_COUNT", 4),
+        tool_result_char_limit=_int("TOOL_RESULT_CHAR_LIMIT", 6000),
+        search_result_limit=_int("SEARCH_RESULT_LIMIT", 8),
+        # --- Token budgets sized for Groq free tier (Qwen3 = 6K TPM) ---
+        planner_input_char_budget=_int("PLANNER_INPUT_CHAR_BUDGET", 12000),
+        worker_input_char_budget=_int("WORKER_INPUT_CHAR_BUDGET", 12000),
+        # Synthesis gets larger budgets for Gemini-level report quality
+        synthesis_input_char_budget=_int("SYNTHESIS_INPUT_CHAR_BUDGET", 32000),
+        section_draft_output_tokens=_int("SECTION_DRAFT_OUTPUT_TOKENS", 2000),
+        final_report_output_tokens=_int("FINAL_REPORT_OUTPUT_TOKENS", 6000),
+        # --- Evidence thresholds lowered for free-tier throughput ---
+        min_scraped_sources_per_task=_int("MIN_SCRAPED_SOURCES_PER_TASK", 2),
+        min_evidence_cards_per_task=_int("MIN_EVIDENCE_CARDS_PER_TASK", 3),
         min_authoritative_sources_per_task=_int("MIN_AUTHORITATIVE_SOURCES_PER_TASK", 1),
-        min_distinct_sources_for_report=_int("MIN_DISTINCT_SOURCES_FOR_REPORT", 10),
-        min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 5),
-        min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 14),
-        min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 2),
+        min_distinct_sources_for_report=_int("MIN_DISTINCT_SOURCES_FOR_REPORT", 6),
+        min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 3),
+        min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 8),
+        min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 1),
         # --- Provider resilience timers ---
         # Cooldown after a confirmed rate-limit 429 from the provider API
         provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 20),
@@ -134,15 +138,15 @@ def get_settings() -> Settings:
         groq_request_limit_per_minute=_int("GROQ_REQUEST_LIMIT_PER_MINUTE", 14),
         groq_token_limit_per_minute=_int("GROQ_TOKEN_LIMIT_PER_MINUTE", 15000),
         groq_max_parallel_requests=_int("GROQ_MAX_PARALLEL_REQUESTS", 1),
-        # --- Groq Secondary (separate rate limits — Qwen3 32B) ---
+        # --- Groq Secondary (Qwen3 32B — ACTUAL limit is 6K TPM, we leave 1K headroom) ---
         groq_secondary_model=os.getenv("GROQ_SECONDARY_MODEL", "qwen/qwen3-32b"),
         groq_secondary_request_limit_per_minute=_int("GROQ_SECONDARY_REQUEST_LIMIT_PER_MINUTE", 14),
-        groq_secondary_token_limit_per_minute=_int("GROQ_SECONDARY_TOKEN_LIMIT_PER_MINUTE", 15000),
-        # --- Groq Tertiary (separate rate limits — Llama 4 Scout 17B MoE) ---
-        groq_tertiary_model=os.getenv("GROQ_TERTIARY_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+        groq_secondary_token_limit_per_minute=_int("GROQ_SECONDARY_TOKEN_LIMIT_PER_MINUTE", 5000),
+        # --- Groq Tertiary (llama-3.1-8b — lightweight, fast, reliable tool calling) ---
+        groq_tertiary_model=os.getenv("GROQ_TERTIARY_MODEL", "llama-3.1-8b-instant"),
         groq_tertiary_request_limit_per_minute=_int("GROQ_TERTIARY_REQUEST_LIMIT_PER_MINUTE", 14),
         groq_tertiary_token_limit_per_minute=_int("GROQ_TERTIARY_TOKEN_LIMIT_PER_MINUTE", 15000),
-        # --- Gemini (SECONDARY — flash-lite has 1000 RPD vs 20 RPD for flash) ---
+        # --- Gemini (SECONDARY — flash-lite: 20 RPD free tier, resets midnight PT) ---
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         gemini_request_limit_per_minute=_int("GEMINI_REQUEST_LIMIT_PER_MINUTE", 15),
         gemini_token_limit_per_minute=_int("GEMINI_TOKEN_LIMIT_PER_MINUTE", 250000),

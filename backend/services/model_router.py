@@ -880,7 +880,12 @@ class ModelRouter:
         trace_id: str,
     ) -> Any | Exception:
         policy = state.policy
-        token_cost = estimate_tokens_from_messages(trim_messages_for_budget(messages, budget)) + max(0, budget.max_output_tokens)
+        # Only count input tokens for the local quota guard estimate.
+        # Including budget.max_output_tokens (which is just a ceiling, e.g. 6000)
+        # would cause the guard to block requests that are well within the provider's
+        # actual capacity.  The provider itself enforces output limits.
+        input_tokens = estimate_tokens_from_messages(trim_messages_for_budget(messages, budget))
+        token_cost = input_tokens + min(budget.max_output_tokens, 500)  # assume ~500 output for guard purposes
 
         # Local quota guard — prevent sending requests we know will 429
         reservation = await self._coordination_store.reserve_quota(

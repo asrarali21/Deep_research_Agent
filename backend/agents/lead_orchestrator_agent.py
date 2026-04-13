@@ -251,16 +251,24 @@ async def decompose_node(state: OrchestratorState):
     feedback = state.get("human_feedback", "")
 
     prompt = (
-        "Break the user query into highly specific research tasks that can be run independently. "
-        f"Create at most {settings.max_initial_tasks} tasks, ordered by importance. "
-        "Also define the essential report sections needed for a thorough final answer. "
-        "Favor breadth first, avoid duplicate work, and keep each task self-contained."
+        "You are planning a deep research investigation. Break the user query into highly specific, "
+        "self-contained research tasks that can be run independently by worker agents.\n\n"
+        "TASK COUNT RULES — decide dynamically based on query complexity:\n"
+        "  • Simple/focused query (single topic, clear answer): 2 tasks\n"
+        "  • Moderate query (multiple facets, comparison needed): 3 tasks\n"
+        f"  • Complex/multi-domain query (broad scope, many stakeholders): up to {settings.max_initial_tasks} tasks\n\n"
+        "EFFICIENCY RULES (critical — we have limited API budget):\n"
+        "  • Each task must cover MAXIMUM ground — combine related sub-questions into one task\n"
+        "  • NO overlapping tasks — every task must investigate a DISTINCT angle\n"
+        "  • Favor breadth over depth — workers will dive deeper on their own\n"
+        "  • Order tasks by importance (most critical first)\n\n"
+        "Also define the essential report sections needed for a thorough final answer."
     )
     if feedback:
         prompt += f"\nIncorporate this human feedback into the revised plan: {feedback}"
 
     messages = [
-        SystemMessage(content="You are the planning brain for a production research system."),
+        SystemMessage(content="You are the planning brain for a production research system. You must be efficient with resources while ensuring comprehensive coverage."),
         HumanMessage(content=f"User Query: {query}\n\n{prompt}"),
     ]
     response = await router.generate_structured(
@@ -398,14 +406,25 @@ async def build_outline_node(state: OrchestratorState):
     required_sections = state.get("required_sections", [])
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
     messages = [
-        SystemMessage(content="You design a rigorous final report outline for a production research system."),
+        SystemMessage(content="You design comprehensive, publication-grade report outlines. Your outlines produce reports comparable to professional research firms and Gemini Deep Research."),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
                 f"Required Sections:\n{chr(10).join(f'- {section}' for section in required_sections)}\n\n"
-                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=16)}\n\n"
-                "Create a concise but thorough report outline. Preserve important required sections, merge only if it improves clarity, and order the sections logically. "
-                "For market topics, favor sections like market size, infrastructure footprint, key players, pricing/business models, policy tailwinds, economics, and outlook."
+                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=20)}\n\n"
+                "Create a COMPREHENSIVE report outline with 6-10 sections. The report must feel like a professional research document.\n\n"
+                "REQUIRED STRUCTURE:\n"
+                "1. Executive Summary / Overview (always first)\n"
+                "2-8. Detailed analytical sections covering all major angles of the query\n"
+                "   - Include sections for: market analysis, key players/stakeholders, data & statistics, \n"
+                "     trends & developments, policy/regulatory landscape, challenges & risks, \n"
+                "     comparative analysis, case studies (as applicable to the topic)\n"
+                "9. Future Outlook / Projections\n"
+                "10. Conclusion & Recommendations (always last)\n\n"
+                "For market/industry topics: include market size, competitive landscape, pricing/business models, \n"
+                "infrastructure, policy tailwinds, investment trends, and regional analysis.\n"
+                "For technical/scientific topics: include methodology, current state, key findings, applications, limitations.\n"
+                "Order sections logically. Each section title should be specific and descriptive, not generic."
             )
         ),
     ]
@@ -413,10 +432,10 @@ async def build_outline_node(state: OrchestratorState):
         task_type="planner",
         schema=OutlinePlan,
         messages=messages,
-        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=400),
+        budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=500),
         trace_id=state["thread_id"],
     )
-    outline_sections = _dedupe_items(response.sections, max(len(required_sections) + 2, 6)) or required_sections
+    outline_sections = _dedupe_items(response.sections, max(len(required_sections) + 2, 8)) or required_sections
     return {"outline_sections": outline_sections}
 
 
@@ -428,20 +447,36 @@ async def draft_sections_node(state: OrchestratorState):
     section_drafts: dict[str, str] = {}
 
     for section in state.get("outline_sections", []):
-        selected_cards = _select_section_evidence(section, evidence_cards, limit=14)
-        evidence_text = _format_evidence_cards(selected_cards, limit=14)
+        selected_cards = _select_section_evidence(section, evidence_cards, limit=18)
+        evidence_text = _format_evidence_cards(selected_cards, limit=18)
         messages = [
-            SystemMessage(content="You write one section of a high-quality research report using only the supplied evidence."),
+            SystemMessage(
+                content=(
+                    "You are an expert research writer producing publication-grade report sections. "
+                    "Your writing should be comparable to professional consulting reports (McKinsey, BCG) "
+                    "and Gemini Deep Research output — detailed, data-rich, and actionable."
+                )
+            ),
             HumanMessage(
                 content=(
                     f"User Query: {state['original_query']}\n\n"
                     f"Section Title: {section}\n\n"
                     f"Relevant Evidence:\n{evidence_text}\n\n"
-                    f"Supporting Findings:\n{_format_findings(findings, limit=8)}\n\n"
-                    "Write a detailed Markdown section for this title. Be specific, practical, and evidence-driven. "
-                    "Use only the supplied evidence, note uncertainty where needed, and avoid generic filler. "
-                    "Do not use placeholders like 'USD Billion', 'robust CAGR', or 'data is not specified' without explicitly saying which evidence was missing. "
-                    "Prefer concrete numbers, named companies, policies, and dated developments when the evidence contains them."
+                    f"Supporting Findings:\n{_format_findings(findings, limit=10)}\n\n"
+                    "Write a DETAILED Markdown section (300-500 words minimum). Requirements:\n\n"
+                    "FORMAT & STRUCTURE:\n"
+                    "- Start with a brief contextual intro paragraph for this section\n"
+                    "- Use ### subheadings to organize complex information\n"
+                    "- Include Markdown TABLES where comparing data (players, pricing, metrics, timelines)\n"
+                    "- Use bullet lists for key takeaways or feature comparisons\n"
+                    "- End with a brief analytical insight or implication\n\n"
+                    "CONTENT QUALITY:\n"
+                    "- Include ALL specific numbers, dates, company names, and statistics from the evidence\n"
+                    "- Cite sources inline like [Source Name] when referencing specific data points\n"
+                    "- Analyze trends and relationships, don't just list facts\n"
+                    "- Compare and contrast when multiple data points exist\n"
+                    "- Note data gaps or uncertainty explicitly rather than making assumptions\n"
+                    "- NO generic filler phrases like 'significant growth' or 'various factors' — be specific"
                 )
             ),
         ]
@@ -449,7 +484,7 @@ async def draft_sections_node(state: OrchestratorState):
             task_type="synthesis",
             messages=messages,
             budget=RequestBudget(
-                max_input_chars=min(get_settings_instance().synthesis_input_char_budget, 18000),
+                max_input_chars=min(get_settings_instance().synthesis_input_char_budget, 24000),
                 max_output_tokens=settings.section_draft_output_tokens,
             ),
             trace_id=state["thread_id"],
@@ -469,18 +504,43 @@ async def final_edit_node(state: OrchestratorState):
     reference_section = _build_references_section(evidence_cards)
 
     messages = [
-        SystemMessage(content="You are a senior editor who writes production-grade reports using only verified facts and supplied drafts."),
+        SystemMessage(
+            content=(
+                "You are a senior research editor producing publication-grade reports. "
+                "Your output should match the quality of Gemini Deep Research, McKinsey reports, "
+                "and professional market research — comprehensive, well-structured, and data-rich. "
+                "Write the FULL final report, not a summary."
+            )
+        ),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
                 f"Quality Summary: {state.get('quality_summary', 'No quality summary available.')}\n\n"
-                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=28)}\n\n"
+                f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=30)}\n\n"
                 f"Section Drafts:\n{draft_text}\n\n"
-                f"Known Sources:\n{chr(10).join(f'- {source}' for source in sources)}\n\n"
-                "Write a comprehensive Markdown report, not a brief summary. Include: a short introduction, clear section headings, concrete recommendations, important cautions or uncertainty where relevant, and a conclusion. "
-                "Use tables or bullet comparisons when they make the evidence easier to understand, especially for pricing, major players, timelines, or policy changes. "
-                "Use only the supplied findings and evidence. Do not invent market share tables, competitor claims, or numeric projections that are not present in the evidence. "
-                "Do not add a references section; it will be appended separately from validated evidence."
+                f"Known Sources:\n{chr(10).join(f'- {source}' for source in sources[:40])}\n\n"
+                "WRITE A COMPREHENSIVE FINAL REPORT following these rules:\n\n"
+                "STRUCTURE (mandatory):\n"
+                "# [Descriptive Report Title]\n"
+                "## Executive Summary (3-4 key findings as bullets + brief overview paragraph)\n"
+                "## [Section 2-8: Detailed analytical sections from the drafts]\n"
+                "## Future Outlook & Projections\n"
+                "## Conclusion & Recommendations\n\n"
+                "FORMATTING REQUIREMENTS:\n"
+                "- Use proper Markdown: # for title, ## for sections, ### for subsections\n"
+                "- Include AT LEAST 2-3 Markdown TABLES comparing key data (players, pricing, market shares, metrics, timelines)\n"
+                "- Use bullet lists for key takeaways and feature comparisons\n"
+                "- Bold **key statistics** and important figures\n"
+                "- Include inline source citations like [Source Name]\n\n"
+                "CONTENT REQUIREMENTS:\n"
+                "- Minimum 3000 words — this is a DETAILED report, not a summary\n"
+                "- Integrate ALL specific numbers, dates, and company names from the evidence\n"
+                "- Provide analytical insights and trend analysis, not just fact listing\n"
+                "- Compare and contrast data points across sources\n"
+                "- Note data gaps explicitly\n"
+                "- End with actionable, specific recommendations\n"
+                "- Do NOT add a references section; it will be appended automatically\n"
+                "- Do NOT invent data not present in the evidence — cite only what is supplied"
             )
         ),
     ]
