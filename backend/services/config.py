@@ -71,6 +71,16 @@ class Settings:
     groq_tertiary_model: str
     groq_tertiary_request_limit_per_minute: int
     groq_tertiary_token_limit_per_minute: int
+
+    # Cerebras Fallback Models (Fast Inference)
+    cerebras_model: str
+    cerebras_request_limit_per_minute: int
+    cerebras_token_limit_per_minute: int
+    cerebras_max_parallel_requests: int
+    cerebras_secondary_model: str
+    cerebras_secondary_request_limit_per_minute: int
+    cerebras_secondary_token_limit_per_minute: int
+
     openrouter_base_url: str
     openrouter_model: str
     openrouter_request_limit_per_minute: int
@@ -146,6 +156,14 @@ def get_settings() -> Settings:
         groq_tertiary_model=os.getenv("GROQ_TERTIARY_MODEL", "llama-3.1-8b-instant"),
         groq_tertiary_request_limit_per_minute=_int("GROQ_TERTIARY_REQUEST_LIMIT_PER_MINUTE", 14),
         groq_tertiary_token_limit_per_minute=_int("GROQ_TERTIARY_TOKEN_LIMIT_PER_MINUTE", 15000),
+        # --- Cerebras fallback parameters ---
+        cerebras_model=os.getenv("CEREBRAS_MODEL", "llama3.1-8b"),
+        cerebras_request_limit_per_minute=_int("CEREBRAS_REQUEST_LIMIT_PER_MINUTE", 30),
+        cerebras_token_limit_per_minute=_int("CEREBRAS_TOKEN_LIMIT_PER_MINUTE", 60000),
+        cerebras_max_parallel_requests=_int("CEREBRAS_MAX_PARALLEL_REQUESTS", 2),
+        cerebras_secondary_model=os.getenv("CEREBRAS_SECONDARY_MODEL", "qwen-3-235b-a22b-instruct-2507"),
+        cerebras_secondary_request_limit_per_minute=_int("CEREBRAS_SECONDARY_REQUEST_LIMIT_PER_MINUTE", 30),
+        cerebras_secondary_token_limit_per_minute=_int("CEREBRAS_SECONDARY_TOKEN_LIMIT_PER_MINUTE", 30000),
         # --- Gemini (SECONDARY — flash-lite: 20 RPD free tier, resets midnight PT) ---
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         gemini_request_limit_per_minute=_int("GEMINI_REQUEST_LIMIT_PER_MINUTE", 15),

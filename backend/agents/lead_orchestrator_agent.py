@@ -496,51 +496,38 @@ async def draft_sections_node(state: OrchestratorState):
 
 async def final_edit_node(state: OrchestratorState):
     router = get_model_router()
-    findings = state.get("findings", [])
     sources = _curated_sources(state)
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources)
     section_drafts = state.get("section_drafts", {})
-    draft_text = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
+    
+    # Programmatic Assembly: We don't want the LLM to rewrite these sections as it will
+    # inevitably compress and summarize them. We want the full depth.
+    draft_text_formatted = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
     reference_section = _build_references_section(evidence_cards)
-
+    
+    # We only ask the LLM to generate the front-matter (Executive Summary) 
+    # and back-matter (Conclusion) to sandwich the generated sections seamlessly.
     messages = [
         SystemMessage(
             content=(
-                "You are a senior research editor producing publication-grade reports. "
-                "Your output should match the quality of Gemini Deep Research, McKinsey reports, "
-                "and professional market research — comprehensive, well-structured, and data-rich. "
-                "Write the FULL final report, not a summary."
+                "You are an executive research editor. "
+                "Your task is to write ONLY the Executive Summary and the Final Conclusion for a large research report. "
+                "The core detailed sections have already been written by specialist agents."
             )
         ),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
-                f"Quality Summary: {state.get('quality_summary', 'No quality summary available.')}\n\n"
                 f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=30)}\n\n"
-                f"Section Drafts:\n{draft_text}\n\n"
-                f"Known Sources:\n{chr(10).join(f'- {source}' for source in sources[:40])}\n\n"
-                "WRITE A COMPREHENSIVE FINAL REPORT following these rules:\n\n"
-                "STRUCTURE (mandatory):\n"
-                "# [Descriptive Report Title]\n"
-                "## Executive Summary (3-4 key findings as bullets + brief overview paragraph)\n"
-                "## [Section 2-8: Detailed analytical sections from the drafts]\n"
-                "## Future Outlook & Projections\n"
-                "## Conclusion & Recommendations\n\n"
-                "FORMATTING REQUIREMENTS:\n"
-                "- Use proper Markdown: # for title, ## for sections, ### for subsections\n"
-                "- Include AT LEAST 2-3 Markdown TABLES comparing key data (players, pricing, market shares, metrics, timelines)\n"
-                "- Use bullet lists for key takeaways and feature comparisons\n"
-                "- Bold **key statistics** and important figures\n"
-                "- Include inline source citations like [Source Name]\n\n"
-                "CONTENT REQUIREMENTS:\n"
-                "- Minimum 3000 words — this is a DETAILED report, not a summary\n"
-                "- Integrate ALL specific numbers, dates, and company names from the evidence\n"
-                "- Provide analytical insights and trend analysis, not just fact listing\n"
-                "- Compare and contrast data points across sources\n"
-                "- Note data gaps explicitly\n"
-                "- End with actionable, specific recommendations\n"
-                "- Do NOT add a references section; it will be appended automatically\n"
-                "- Do NOT invent data not present in the evidence — cite only what is supplied"
+                "Write ONLY two things:\n"
+                "1. An 'Executive Summary' (3-4 bullet points and a short summary paragraph highlighting the most critical insights from the evidence).\n"
+                "2. A 'Conclusion & Future Outlook' (A strong concluding section with actionable recommendations or future projections based on the evidence).\n\n"
+                "Do NOT write the middle sections. Do NOT write an introduction. Focus on high-impact insights.\n"
+                "Use EXACTLY these markdown headers so I can parse your output:\n\n"
+                "## Executive Summary\n"
+                "[Your text here]\n\n"
+                "## Conclusion\n"
+                "[Your text here]"
             )
         ),
     ]
@@ -549,11 +536,37 @@ async def final_edit_node(state: OrchestratorState):
         messages=messages,
         budget=RequestBudget(
             max_input_chars=get_settings_instance().synthesis_input_char_budget,
-            max_output_tokens=get_settings_instance().final_report_output_tokens,
+            max_output_tokens=2000,
         ),
         trace_id=state["thread_id"],
     )
-    return {"final_report": _replace_references_section(response.content, reference_section)}
+    
+    # Extract the generated front/back matter
+    llm_output = response.content
+    exec_summary = ""
+    conclusion = ""
+    
+    if "## Conclusion" in llm_output and "## Executive Summary" in llm_output:
+        parts = llm_output.split("## Conclusion")
+        exec_summary = parts[0].replace("## Executive Summary", "").strip()
+        conclusion = parts[1].strip()
+    else:
+        # Fallback if the LLM didn't format perfectly
+        exec_summary = llm_output
+        conclusion = "Based on the detailed sections below, the market presents significant opportunities but requires careful navigation of the challenges outlined."
+
+    # Programmatic Report Generation
+    report_title = state['original_query'].title()
+    if len(report_title) > 60:
+        report_title = "Deep Research Report"
+        
+    final_report = f"# {report_title}\n\n"
+    final_report += f"## Executive Summary\n\n{exec_summary}\n\n"
+    final_report += f"{draft_text_formatted}\n\n"
+    final_report += f"## Conclusion & Future Outlook\n\n{conclusion}\n\n"
+    final_report += f"{reference_section}"
+
+    return {"final_report": final_report}
 
 
 def route_human_approval(state: OrchestratorState):

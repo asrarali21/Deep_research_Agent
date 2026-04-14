@@ -565,6 +565,45 @@ class HuggingFaceProvider:
             raise
 
 
+class CerebrasProvider:
+    def __init__(self, policy: ProviderPolicy, api_key: str) -> None:
+        self._llm = ChatOpenAI(
+            model=policy.model,
+            api_key=api_key,
+            base_url="https://api.cerebras.ai/v1",
+            temperature=0,
+            max_retries=0,
+        )
+
+    async def generate_text(self, messages: list[BaseMessage], budget: RequestBudget) -> AIMessage:
+        return await self._llm.ainvoke(trim_messages_for_budget(messages, budget))
+
+    async def generate_structured(self, schema: type, messages: list[BaseMessage], budget: RequestBudget) -> Any:
+        return await self._llm.with_structured_output(schema).ainvoke(trim_messages_for_budget(messages, budget))
+
+    async def generate_tool_calling(
+        self,
+        messages: list[BaseMessage],
+        tools: list[type],
+        budget: RequestBudget,
+    ) -> AIMessage:
+        trimmed_messages = trim_messages_for_budget(messages, budget)
+        try:
+            return await self._llm.bind_tools(tools).ainvoke(trimmed_messages)
+        except Exception as error:
+            for text in _extract_failed_generation_texts(error):
+                recovered = coerce_tool_calls_from_text(text, tools)
+                if recovered is not None:
+                    return recovered
+            try:
+                repaired = await repair_tool_call_with_plain_json(self._llm, trimmed_messages, tools, budget)
+            except Exception:
+                repaired = None
+            if repaired is not None:
+                return repaired
+            raise
+
+
 # ---------------------------------------------------------------------------
 # ModelRouter
 # ---------------------------------------------------------------------------
@@ -601,6 +640,7 @@ class ModelRouter:
 
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         groq_api_key = os.environ.get("GROQ_API_KEY")
+        cerebras_api_key = os.environ.get("CEREBRAS_API_KEY")
         openrouter_api_key = os.environ.get("OPEN_ROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         hf_api_key = os.environ.get("HUGGINGFACE_API_KEY")
 
@@ -653,6 +693,38 @@ class ModelRouter:
                 )
             )
             self._clients["groq_tertiary"] = GroqProvider(policies[-1], groq_api_key)
+
+        # Priority 0 — Cerebras Primary (llama3.1-8b)
+        if cerebras_api_key:
+            policies.append(
+                ProviderPolicy(
+                    name="cerebras",
+                    provider_type="cerebras",
+                    model=self._settings.cerebras_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=0,
+                    request_limit_per_minute=self._settings.cerebras_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.cerebras_token_limit_per_minute,
+                    max_parallel_requests=self._settings.cerebras_max_parallel_requests,
+                )
+            )
+            self._clients["cerebras"] = CerebrasProvider(policies[-1], cerebras_api_key)
+
+        # Priority 0 — Cerebras Secondary (qwen-3-235b)
+        if cerebras_api_key and self._settings.cerebras_secondary_model:
+            policies.append(
+                ProviderPolicy(
+                    name="cerebras_secondary",
+                    provider_type="cerebras",
+                    model=self._settings.cerebras_secondary_model,
+                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    priority=0,
+                    request_limit_per_minute=self._settings.cerebras_secondary_request_limit_per_minute,
+                    token_limit_per_minute=self._settings.cerebras_secondary_token_limit_per_minute,
+                    max_parallel_requests=self._settings.cerebras_max_parallel_requests,
+                )
+            )
+            self._clients["cerebras_secondary"] = CerebrasProvider(policies[-1], cerebras_api_key)
 
         # Priority 1 — Gemini (high quality, limited daily quota on free tier)
         if gemini_api_key:
