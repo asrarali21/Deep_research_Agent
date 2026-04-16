@@ -797,7 +797,12 @@ class ModelRouter:
         budget: RequestBudget,
         trace_id: str,
     ) -> AIMessage:
-        return await self._execute(task_type, "text", messages, budget, trace_id, schema=None, tools=None)
+        response = await self._execute(task_type, "text", messages, budget, trace_id, schema=None, tools=None)
+        if hasattr(response, "content") and isinstance(response.content, str):
+            # Clean out <think>...</think> blocks from models like Qwen/DeepSeek
+            cleaned_content = re.sub(r'<think>.*?</think>', '', response.content, flags=re.DOTALL).strip()
+            response.content = cleaned_content
+        return response
 
     async def generate_structured(
         self,
