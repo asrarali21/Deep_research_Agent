@@ -3,6 +3,7 @@ Lead Orchestrator — batches research work and routes every model call through 
 """
 
 import operator
+import re
 from typing import Annotated, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,6 +22,7 @@ from services.source_quality import (
     is_low_value_reference_url,
     is_reference_usable,
     looks_like_homepage,
+    query_tokens,
 )
 
 
@@ -228,20 +230,130 @@ def _format_evidence_cards(evidence_cards: list[dict], limit: int = 24) -> str:
     return "\n".join(lines) if lines else "No structured evidence cards were collected."
 
 
-def _select_section_evidence(section: str, evidence_cards: list[dict], limit: int = 10) -> list[dict]:
+def _section_tokens(value: str) -> set[str]:
+    return set(query_tokens(value.replace("_", " ")))
+
+
+def _section_relevance_score(section: str, card: dict) -> int:
     normalized_section = normalize_section_tag(section)
-    matching = [card for card in evidence_cards if normalize_section_tag(card.get("section_tag", "")) == normalized_section]
-    if len(matching) < limit:
-        supplemental = [card for card in evidence_cards if card not in matching]
-        supplemental.sort(
-            key=lambda card: (
+    card_tag = normalize_section_tag(card.get("section_tag", ""))
+    score = 0
+
+    if card_tag == normalized_section:
+        score += 8
+    elif card_tag not in {"", "general"} and (card_tag in normalized_section or normalized_section in card_tag):
+        score += 4
+
+    section_tokens = _section_tokens(section) or _section_tokens(normalized_section)
+    card_tokens = _section_tokens(
+        " ".join(
+            [
+                card_tag,
+                str(card.get("claim", "")),
+                str(card.get("source_title", "")),
+                str(card.get("excerpt", ""))[:160],
+            ]
+        )
+    )
+    score += len(section_tokens & card_tokens) * 2
+    return score
+
+
+def _select_section_evidence(section: str, evidence_cards: list[dict], limit: int = 10) -> list[dict]:
+    ranked: list[tuple[int, int, float, dict]] = []
+    for card in evidence_cards:
+        relevance = _section_relevance_score(section, card)
+        if relevance <= 0:
+            continue
+        ranked.append(
+            (
+                relevance,
                 int(card.get("authority_score", 0)),
                 float(card.get("confidence", 0.0)),
-            ),
-            reverse=True,
+                card,
+            )
         )
-        matching.extend(supplemental[: max(0, limit - len(matching))])
-    return matching[:limit]
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [card for _, _, _, card in ranked[:limit]]
+
+
+def _select_section_findings(section: str, findings: list[dict], evidence_cards: list[dict], limit: int = 8) -> list[dict]:
+    section_sources = {str(card.get("source_url", "")).strip() for card in evidence_cards if card.get("source_url")}
+    section_tokens = _section_tokens(section)
+    ranked: list[tuple[int, float, dict]] = []
+
+    for finding in findings:
+        source_url = str(finding.get("source_url", "")).strip()
+        fact = str(finding.get("fact", ""))
+        score = 0
+        if source_url and source_url in section_sources:
+            score += 4
+        score += len(section_tokens & _section_tokens(fact)) * 2
+        if score <= 0:
+            continue
+        ranked.append((score, float(finding.get("confidence", 0.0)), finding))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [finding for _, _, finding in ranked[:limit]]
+
+
+def _is_front_or_back_matter_section(section: str) -> bool:
+    lowered = " ".join(section.lower().replace("&", " and ").split())
+    exact_matches = {
+        "overview",
+        "executive summary",
+        "executive summary / overview",
+        "executive summary overview",
+        "executive overview",
+        "conclusion",
+        "recommendations",
+        "future outlook",
+        "conclusion and recommendations",
+        "conclusion and future outlook",
+    }
+    if lowered in exact_matches:
+        return True
+    return "executive summary" in lowered or lowered.startswith("conclusion")
+
+
+def _filter_body_sections(sections: list[str], required_sections: list[str]) -> list[str]:
+    body_sections = _dedupe_items([section for section in sections if not _is_front_or_back_matter_section(section)])
+    if body_sections:
+        return body_sections
+
+    required_body_sections = _dedupe_items(
+        [section for section in required_sections if not _is_front_or_back_matter_section(section)]
+    )
+    if required_body_sections:
+        return required_body_sections
+    return _dedupe_items(sections)
+
+
+def _condense_section_for_editor(content: str, limit: int = 900) -> str:
+    cleaned = content.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rsplit(" ", 1)[0].rstrip() + "..."
+
+
+def _build_insufficient_evidence_report(title: str, quality_summary: str, reference_section: str) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "## Executive Summary",
+        "",
+        "Validated evidence was not strong enough to generate a reliable final report without introducing unsupported claims.",
+        "",
+        "## Research Status",
+        "",
+        "- The system preserved only validated evidence and intentionally skipped synthetic fallback citations.",
+        "- Additional targeted research is required before drawing confident conclusions.",
+    ]
+    if quality_summary.strip():
+        lines.extend(["", f"Quality summary: {quality_summary.strip()}"])
+    lines.extend(["", reference_section])
+    return "\n".join(lines)
 
 
 async def decompose_node(state: OrchestratorState):
@@ -435,7 +547,10 @@ async def build_outline_node(state: OrchestratorState):
         budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=500),
         trace_id=state["thread_id"],
     )
-    outline_sections = _dedupe_items(response.sections, max(len(required_sections) + 2, 8)) or required_sections
+    outline_sections = _filter_body_sections(
+        _dedupe_items(response.sections, max(len(required_sections) + 2, 8)),
+        required_sections,
+    )
     return {"outline_sections": outline_sections}
 
 
@@ -448,6 +563,14 @@ async def draft_sections_node(state: OrchestratorState):
 
     for section in state.get("outline_sections", []):
         selected_cards = _select_section_evidence(section, evidence_cards, limit=18)
+        supporting_findings = _select_section_findings(section, findings, selected_cards, limit=10)
+        if not selected_cards:
+            section_drafts[section] = (
+                "Validated evidence for this section was too thin or weakly matched to draft it confidently.\n\n"
+                "- Additional targeted research is required before making claims here."
+            )
+            continue
+
         evidence_text = _format_evidence_cards(selected_cards, limit=18)
         messages = [
             SystemMessage(
@@ -462,7 +585,7 @@ async def draft_sections_node(state: OrchestratorState):
                     f"User Query: {state['original_query']}\n\n"
                     f"Section Title: {section}\n\n"
                     f"Relevant Evidence:\n{evidence_text}\n\n"
-                    f"Supporting Findings:\n{_format_findings(findings, limit=10)}\n\n"
+                    f"Supporting Findings:\n{_format_findings(supporting_findings, limit=10)}\n\n"
                     "Write a DETAILED Markdown section (300-500 words minimum). Requirements:\n\n"
                     "FORMAT & STRUCTURE:\n"
                     "- Start with a brief contextual intro paragraph for this section\n"
@@ -495,17 +618,37 @@ async def draft_sections_node(state: OrchestratorState):
 
 
 async def final_edit_node(state: OrchestratorState):
+    settings = get_settings()
     router = get_model_router()
     sources = _curated_sources(state)
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources)
     section_drafts = state.get("section_drafts", {})
-    
+
     # Programmatic Assembly: We don't want the LLM to rewrite these sections as it will
     # inevitably compress and summarize them. We want the full depth.
     draft_text_formatted = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
     reference_section = _build_references_section(evidence_cards)
-    
-    # We only ask the LLM to generate the front-matter (Executive Summary) 
+
+    report_title = state["original_query"].title()
+    if len(report_title) > 60:
+        report_title = "Deep Research Report"
+
+    if not evidence_cards:
+        return {
+            "final_report": _build_insufficient_evidence_report(
+                report_title,
+                state.get("quality_summary", ""),
+                reference_section,
+            )
+        }
+
+    section_digest = "\n\n".join(
+        f"## {title}\n{_condense_section_for_editor(content)}"
+        for title, content in section_drafts.items()
+        if content.strip()
+    )
+
+    # We only ask the LLM to generate the front-matter (Executive Summary)
     # and back-matter (Conclusion) to sandwich the generated sections seamlessly.
     messages = [
         SystemMessage(
@@ -518,6 +661,7 @@ async def final_edit_node(state: OrchestratorState):
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
+                f"Drafted Body Sections:\n{section_digest}\n\n"
                 f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=30)}\n\n"
                 "Write ONLY two things:\n"
                 "1. An 'Executive Summary' (3-4 bullet points and a short summary paragraph highlighting the most critical insights from the evidence).\n"
@@ -535,31 +679,31 @@ async def final_edit_node(state: OrchestratorState):
         task_type="synthesis",
         messages=messages,
         budget=RequestBudget(
-            max_input_chars=get_settings_instance().synthesis_input_char_budget,
-            max_output_tokens=2000,
+            max_input_chars=min(get_settings_instance().synthesis_input_char_budget, 24000),
+            max_output_tokens=min(settings.final_report_output_tokens, 2000),
         ),
         trace_id=state["thread_id"],
     )
-    
+
     # Extract the generated front/back matter
     llm_output = response.content
     exec_summary = ""
     conclusion = ""
-    
-    if "## Conclusion" in llm_output and "## Executive Summary" in llm_output:
-        parts = llm_output.split("## Conclusion")
-        exec_summary = parts[0].replace("## Executive Summary", "").strip()
-        conclusion = parts[1].strip()
+
+    match = re.search(
+        r"##\s*Executive Summary\s*(.*?)\s*##\s*Conclusion\b\s*(.*)",
+        llm_output,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        exec_summary = match.group(1).strip()
+        conclusion = match.group(2).strip()
     else:
         # Fallback if the LLM didn't format perfectly
         exec_summary = llm_output
-        conclusion = "Based on the detailed sections below, the market presents significant opportunities but requires careful navigation of the challenges outlined."
+        conclusion = "The body sections below contain the validated findings. Any remaining uncertainty should be resolved with targeted follow-up research rather than assumption."
 
     # Programmatic Report Generation
-    report_title = state['original_query'].title()
-    if len(report_title) > 60:
-        report_title = "Deep Research Report"
-        
     final_report = f"# {report_title}\n\n"
     final_report += f"## Executive Summary\n\n{exec_summary}\n\n"
     final_report += f"{draft_text_formatted}\n\n"

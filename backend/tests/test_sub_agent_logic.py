@@ -96,3 +96,29 @@ class SubAgentLogicTests(unittest.TestCase):
         self.assertEqual(valid_findings, [])
         self.assertEqual(valid_cards, [])
         self.assertEqual(coverage_tags, ["general"])
+
+    def test_finalize_node_does_not_fabricate_evidence_when_submission_is_missing(self):
+        state = {
+            "trace_id": "trace-1",
+            "task": "task",
+            "messages": [AIMessage(content="Here is a narrative summary without tool output.")],
+            "working_summary": "Search results and scraps of notes",
+            "findings": [],
+            "evidence_cards": [],
+            "sources": ["https://example.com/source-a"],
+            "discovered_sources": ["https://example.com/source-a"],
+            "seen_source_urls": ["https://example.com/source-a"],
+            "coverage_tags": [],
+            "completed_tasks": [],
+            "iterations": 1,
+            "status": "running",
+        }
+
+        result = sub_agent.finalize_node(state)
+
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["evidence_cards"], [])
+        self.assertEqual(result["coverage_tags"], [])
+        self.assertEqual(result["sources"], ["https://example.com/source-a"])
+        self.assertEqual(result["completed_tasks"], ["task"])
+        self.assertEqual(result["status"], "insufficient_evidence")

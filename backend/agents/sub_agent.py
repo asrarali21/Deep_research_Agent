@@ -274,6 +274,18 @@ def _validated_findings(raw_findings: list[Finding], scraped_sources: list[str])
     return validated
 
 
+def _empty_submission_result(state: SubAgentState, status: str) -> dict:
+    return {
+        "findings": [],
+        "evidence_cards": [],
+        "coverage_tags": [],
+        "sources": _dedupe_strings(list(state.get("sources", []))),
+        "discovered_sources": _dedupe_strings(list(state.get("discovered_sources", []))),
+        "completed_tasks": [state["task"]],
+        "status": status,
+    }
+
+
 def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindings) -> tuple[list[str], list[dict], list[dict], list[str]]:
     settings = get_settings()
     scraped_sources = _dedupe_strings(list(state.get("sources", [])))
@@ -478,33 +490,9 @@ def finalize_node(state: SubAgentState) -> dict:
                 except ValidationError:
                     break
 
-    content = last_message.content if hasattr(last_message, "content") else str(last_message)
-    fallback_source = state.get("sources", ["parsed_from_conversation"])[0] if state.get("sources") else "parsed_from_conversation"
-    findings = [_finding_to_dict(Finding(fact=str(content)[:500], source_url=fallback_source, confidence=0.5))]
-    source_type = infer_source_type(fallback_source)
-    evidence_cards = [
-        _evidence_to_dict(
-            EvidenceCard(
-                claim=str(content)[:300],
-                source_url=fallback_source,
-                source_title=urlsplit(fallback_source).netloc or "Fallback source",
-                excerpt=state.get("working_summary", "")[:500] or str(content)[:500],
-                section_tag=normalize_section_tag(state["task"]),
-                source_type=source_type,
-                authority_score=compute_authority_score(fallback_source, source_type),
-                confidence=0.5,
-            )
-        )
-    ]
-    return {
-        "findings": findings,
-        "evidence_cards": evidence_cards,
-        "coverage_tags": [normalize_section_tag(state["task"])],
-        "sources": _dedupe_strings(list(state.get("sources", [])) + [fallback_source]),
-        "discovered_sources": _dedupe_strings(list(state.get("discovered_sources", [])) + [fallback_source]),
-        "completed_tasks": [state["task"]],
-        "status": status,
-    }
+    if status == "done":
+        status = "insufficient_evidence"
+    return _empty_submission_result(state, status)
 
 
 def should_continue(state: SubAgentState) -> str:

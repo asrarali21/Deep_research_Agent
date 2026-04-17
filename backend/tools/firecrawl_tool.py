@@ -1,10 +1,22 @@
 import os
 import time
 
-import trafilatura
 from dotenv import load_dotenv
-from firecrawl import FirecrawlApp
-from langchain_community.tools import DuckDuckGoSearchResults
+
+try:
+    import trafilatura
+except ImportError:  # pragma: no cover - optional dependency in local/dev environments
+    trafilatura = None
+
+try:
+    from firecrawl import FirecrawlApp
+except ImportError:  # pragma: no cover - optional dependency in local/dev environments
+    FirecrawlApp = None
+
+try:
+    from langchain_community.tools import DuckDuckGoSearchResults
+except ImportError:  # pragma: no cover - optional dependency in local/dev environments
+    DuckDuckGoSearchResults = None
 
 from services.config import get_settings
 from services.source_quality import (
@@ -18,8 +30,8 @@ from services.source_quality import (
 
 load_dotenv()
 
-_app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
-_ddg_search = DuckDuckGoSearchResults(output_format="list", num_results=8)
+_app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY")) if FirecrawlApp and os.getenv("FIRECRAWL_API_KEY") else None
+_ddg_search = DuckDuckGoSearchResults(output_format="list", num_results=8) if DuckDuckGoSearchResults else None
 _cache: dict[str, tuple[float, object]] = {}
 
 
@@ -62,6 +74,8 @@ def _coerce_search_result(title: str, url: str, snippet: str, query: str) -> dic
 
 def _collect_firecrawl_results(query: str, limit: int) -> list[dict]:
     results: list[dict] = []
+    if _app is None:
+        return results
     try:
         response = _app.search(query=query, limit=max(limit * 2, limit))
         for item in response.web or []:
@@ -80,6 +94,8 @@ def _collect_firecrawl_results(query: str, limit: int) -> list[dict]:
 
 def _collect_ddg_results(query: str) -> list[dict]:
     results: list[dict] = []
+    if _ddg_search is None:
+        return results
     try:
         raw_results = _run_ddg_search(query)
         for item in raw_results or []:
@@ -97,6 +113,8 @@ def _collect_ddg_results(query: str) -> list[dict]:
 
 
 def _run_ddg_search(query: str):
+    if _ddg_search is None:
+        return []
     return _ddg_search.invoke(query)
 
 
@@ -141,19 +159,20 @@ def scrape(url: str) -> dict:
         "success": False,
     }
 
-    try:
-        response = _app.scrape(normalized_url, formats=["markdown"])
-        if response and response.markdown:
-            payload = {
-                "url": normalized_url,
-                "title": response.metadata.title if response.metadata else "",
-                "content": response.markdown,
-                "success": True,
-            }
-    except Exception:
-        payload = payload
+    if _app is not None:
+        try:
+            response = _app.scrape(normalized_url, formats=["markdown"])
+            if response and response.markdown:
+                payload = {
+                    "url": normalized_url,
+                    "title": response.metadata.title if response.metadata else "",
+                    "content": response.markdown,
+                    "success": True,
+                }
+        except Exception:
+            payload = payload
 
-    if not payload["success"]:
+    if not payload["success"] and trafilatura is not None:
         try:
             downloaded = trafilatura.fetch_url(normalized_url)
             if downloaded:

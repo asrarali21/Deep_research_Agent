@@ -3,7 +3,12 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
-from agents.lead_orchestrator_agent import _find_missing_sections, route_batch_dispatch
+from agents.lead_orchestrator_agent import (
+    _filter_body_sections,
+    _find_missing_sections,
+    _select_section_evidence,
+    route_batch_dispatch,
+)
 from agents.sub_agent import Finding, _finding_to_dict
 from services.config import get_settings
 from services.coordination import InMemoryCoordinationStore
@@ -207,6 +212,47 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(missing, ["Sodium"])
+
+    def test_body_outline_filters_front_and_back_matter_sections(self):
+        sections = _filter_body_sections(
+            [
+                "Executive Summary / Overview",
+                "Competitive Landscape",
+                "Conclusion & Recommendations",
+            ],
+            required_sections=["Pricing", "Policy"],
+        )
+
+        self.assertEqual(sections, ["Competitive Landscape"])
+
+    def test_section_evidence_prefers_relevant_cards_without_unrelated_fallback(self):
+        selected = _select_section_evidence(
+            "Pricing and Business Models",
+            [
+                {
+                    "claim": "Vendors are converging on usage-based pricing with enterprise minimums.",
+                    "source_url": "https://example.com/pricing",
+                    "source_title": "Pricing update",
+                    "excerpt": "Usage pricing now dominates enterprise contracts.",
+                    "section_tag": "pricing",
+                    "authority_score": 8,
+                    "confidence": 0.9,
+                },
+                {
+                    "claim": "New policy incentives support EV charging rollout.",
+                    "source_url": "https://example.com/policy",
+                    "source_title": "Policy memo",
+                    "excerpt": "Incentives are tied to regional deployment.",
+                    "section_tag": "policy",
+                    "authority_score": 9,
+                    "confidence": 0.9,
+                },
+            ],
+            limit=5,
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["source_url"], "https://example.com/pricing")
 
     async def test_quota_unavailable_jobs_wait_and_requeue_instead_of_failing(self):
         local_store = InMemoryCoordinationStore()

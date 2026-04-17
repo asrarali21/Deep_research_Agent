@@ -130,7 +130,7 @@ def get_settings() -> Settings:
         min_distinct_sources_for_report=_int("MIN_DISTINCT_SOURCES_FOR_REPORT", 6),
         min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 3),
         min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 8),
-        min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 1),
+        min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 2),
         # --- Provider resilience timers ---
         # Cooldown after a confirmed rate-limit 429 from the provider API
         provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 20),
