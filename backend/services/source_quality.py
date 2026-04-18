@@ -51,6 +51,38 @@ LOW_VALUE_HOST_HINTS = (
     "wikipedia.org",
 )
 
+GENERIC_WRITING_PAGE_HINTS = (
+    "how to write",
+    "research paper",
+    "research papers",
+    "paperpal",
+    "researcher resources",
+    "writing guide",
+    "introduction guide",
+    "essay",
+    "thesis statement",
+    "citation style",
+    "mla format",
+    "apa format",
+)
+
+WRITING_QUERY_HINTS = {
+    "write",
+    "writing",
+    "paper",
+    "papers",
+    "essay",
+    "thesis",
+    "abstract",
+    "introduction",
+    "citation",
+    "citations",
+    "literature",
+    "review",
+    "format",
+    "guide",
+}
+
 PAYWALL_OR_BLOCK_HINTS = (
     "bloomberg.com",
     "ft.com",
@@ -167,6 +199,39 @@ def query_tokens(query: str) -> list[str]:
     return [token for token in tokens if len(token) > 2 and token not in STOPWORDS]
 
 
+def is_writing_help_query(query: str) -> bool:
+    lowered = query.lower()
+    tokens = set(query_tokens(query))
+    if "research paper" in lowered or "literature review" in lowered:
+        return True
+    return bool(tokens & WRITING_QUERY_HINTS)
+
+
+def is_generic_low_signal_result(query: str, title: str, snippet: str, url: str) -> bool:
+    if not query or is_writing_help_query(query):
+        return False
+
+    text = f"{title} {snippet} {url}".lower()
+    hit_count = sum(1 for hint in GENERIC_WRITING_PAGE_HINTS if hint in text)
+    if hit_count == 0:
+        return False
+
+    # Treat obvious writing-help pages as low signal for normal research queries.
+    if any(
+        phrase in text
+        for phrase in (
+            "how to write",
+            "research paper",
+            "introduction guide",
+            "paperpal",
+            "researcher resources",
+        )
+    ):
+        return True
+
+    return hit_count >= 2 and any(marker in text for marker in ("guide", "template", "examples", "writing"))
+
+
 def score_search_result(query: str, title: str, snippet: str, url: str) -> float:
     text = f"{title} {snippet} {url}".lower()
     tokens = query_tokens(query)
@@ -179,6 +244,8 @@ def score_search_result(query: str, title: str, snippet: str, url: str) -> float
         score -= 3.0
     if is_low_value_reference_url(url):
         score -= 3.0
+    if is_generic_low_signal_result(query, title, snippet, url):
+        score -= 8.0
     if is_probably_paywalled(url):
         score -= 2.0
     if is_blocked_reference_url(url):

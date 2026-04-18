@@ -4,8 +4,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from agents.lead_orchestrator_agent import (
+    _build_references_section,
     _filter_body_sections,
     _find_missing_sections,
+    _prioritize_outline_sections,
+    _section_is_ready_for_draft,
     _select_section_evidence,
     route_batch_dispatch,
 )
@@ -253,6 +256,137 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["source_url"], "https://example.com/pricing")
+
+    def test_references_section_uses_requested_reference_urls_only(self):
+        references = _build_references_section(
+            [
+                {
+                    "source_url": "https://example.com/pricing",
+                    "source_title": "Pricing Update",
+                    "source_type": "news",
+                },
+                {
+                    "source_url": "https://example.com/writing-guide",
+                    "source_title": "How to Write Introductions for Research Papers",
+                    "source_type": "guide",
+                },
+            ],
+            reference_urls=["https://example.com/pricing"],
+        )
+
+        self.assertIn("Pricing Update", references)
+        self.assertNotIn("How to Write Introductions for Research Papers", references)
+
+    def test_prioritize_outline_sections_prefers_supported_sections(self):
+        sections = _prioritize_outline_sections(
+            ["Pricing", "Adoption", "Background", "Policy"],
+            [
+                {
+                    "claim": "Usage-based pricing became the dominant model in 2025.",
+                    "source_url": "https://example.com/pricing-a",
+                    "source_title": "Pricing A",
+                    "excerpt": "In 2025, usage-based pricing reached 68% of new contracts.",
+                    "section_tag": "pricing",
+                    "authority_score": 8,
+                    "confidence": 0.9,
+                },
+                {
+                    "claim": "Enterprise minimums remain common across major vendors.",
+                    "source_url": "https://example.com/pricing-b",
+                    "source_title": "Pricing B",
+                    "excerpt": "Minimum annual commits now exceed $100,000 for large deployments.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                    "confidence": 0.8,
+                },
+                {
+                    "claim": "Per-seat models are still used for smaller teams.",
+                    "source_url": "https://example.com/pricing-c",
+                    "source_title": "Pricing C",
+                    "excerpt": "Seat-based entry tiers remain below 50 users.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                    "confidence": 0.7,
+                },
+                {
+                    "claim": "Adoption accelerated after 2024 due to workflow automation gains.",
+                    "source_url": "https://example.com/adoption-a",
+                    "source_title": "Adoption A",
+                    "excerpt": "Adoption rose from 12% to 31% between 2024 and 2025.",
+                    "section_tag": "adoption",
+                    "authority_score": 8,
+                    "confidence": 0.9,
+                },
+                {
+                    "claim": "Large enterprises lead adoption because they can support orchestration overhead.",
+                    "source_url": "https://example.com/adoption-b",
+                    "source_title": "Adoption B",
+                    "excerpt": "Enterprise IT teams were 2.4x more likely to deploy agents.",
+                    "section_tag": "adoption",
+                    "authority_score": 7,
+                    "confidence": 0.8,
+                },
+                {
+                    "claim": "Background context on automation remains broad.",
+                    "source_url": "https://example.com/background",
+                    "source_title": "Background",
+                    "excerpt": "Automation has existed for decades.",
+                    "section_tag": "background",
+                    "authority_score": 5,
+                    "confidence": 0.6,
+                },
+            ],
+            target_count=2,
+        )
+
+        self.assertEqual(sections, ["Pricing", "Adoption"])
+
+    def test_section_ready_for_draft_requires_multiple_sources_and_hard_detail(self):
+        strong = _section_is_ready_for_draft(
+            "Pricing",
+            [
+                {
+                    "claim": "Usage pricing reached 68% of contracts in 2025.",
+                    "source_url": "https://example.com/pricing-a",
+                    "source_title": "Pricing A",
+                    "excerpt": "68% of contracts used usage pricing.",
+                    "section_tag": "pricing",
+                    "authority_score": 8,
+                },
+                {
+                    "claim": "Enterprise minimums exceed $100,000 annually.",
+                    "source_url": "https://example.com/pricing-b",
+                    "source_title": "Pricing B",
+                    "excerpt": "Minimums now exceed $100,000 for large deployments.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                },
+                {
+                    "claim": "Per-seat plans remain under 50 users.",
+                    "source_url": "https://example.com/pricing-c",
+                    "source_title": "Pricing C",
+                    "excerpt": "Smaller plans remain below 50 users.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                },
+            ],
+        )
+        weak = _section_is_ready_for_draft(
+            "Background",
+            [
+                {
+                    "claim": "Automation has a long history.",
+                    "source_url": "https://example.com/background",
+                    "source_title": "Background",
+                    "excerpt": "Automation has existed for decades.",
+                    "section_tag": "background",
+                    "authority_score": 5,
+                }
+            ],
+        )
+
+        self.assertTrue(strong)
+        self.assertFalse(weak)
 
     async def test_quota_unavailable_jobs_wait_and_requeue_instead_of_failing(self):
         local_store = InMemoryCoordinationStore()

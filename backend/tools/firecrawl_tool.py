@@ -22,6 +22,7 @@ from services.config import get_settings
 from services.source_quality import (
     compute_authority_score,
     infer_source_type,
+    is_generic_low_signal_result,
     is_reference_usable,
     looks_like_homepage,
     normalize_url,
@@ -58,6 +59,9 @@ def _coerce_search_result(title: str, url: str, snippet: str, query: str) -> dic
         return None
 
     normalized = normalize_url(url)
+    if is_generic_low_signal_result(query, title, snippet, normalized):
+        return None
+
     source_type = infer_source_type(normalized)
     authority_score = compute_authority_score(normalized, source_type)
     relevance_score = score_search_result(query, title, snippet, normalized)

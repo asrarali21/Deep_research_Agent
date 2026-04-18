@@ -19,6 +19,7 @@ from services.source_quality import (
     compute_authority_score,
     infer_source_type,
     is_blocked_reference_url,
+    is_generic_low_signal_result,
     is_low_value_reference_url,
     is_reference_usable,
     looks_like_homepage,
@@ -97,7 +98,24 @@ def _is_authoritative_evidence_card(card: dict) -> bool:
     return score >= 8 or card.get("source_type") in {"guideline", "government", "journal", "academic", "hospital", "nonprofit"}
 
 
-def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str]) -> list[dict]:
+def _card_query_relevance_score(query: str, card: dict) -> int:
+    if not query:
+        return 0
+    query_token_set = _section_tokens(query)
+    card_tokens = _section_tokens(
+        " ".join(
+            [
+                str(card.get("section_tag", "")),
+                str(card.get("claim", "")),
+                str(card.get("source_title", "")),
+                str(card.get("excerpt", ""))[:220],
+            ]
+        )
+    )
+    return len(query_token_set & card_tokens)
+
+
+def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str], query: str = "") -> list[dict]:
     allowed_sources = set(source for source in scraped_sources if is_reference_usable(source))
     curated: list[dict] = []
     seen = set()
@@ -116,12 +134,16 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
             continue
         if looks_like_homepage(source_url) and authority_score < 9:
             continue
+        source_title = str(card.get("source_title", "")).strip() or source_url
+        excerpt = str(card.get("excerpt", "")).strip()[:450]
+        if is_generic_low_signal_result(query, source_title, excerpt, source_url):
+            continue
         cleaned = {
             **card,
             "source_url": source_url,
             "claim": claim,
-            "excerpt": str(card.get("excerpt", "")).strip()[:450],
-            "source_title": str(card.get("source_title", "")).strip() or source_url,
+            "excerpt": excerpt,
+            "source_title": source_title,
             "source_type": source_type,
             "authority_score": authority_score,
             "section_tag": normalize_section_tag(card.get("section_tag", "")),
@@ -133,6 +155,7 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
         curated.append(cleaned)
     curated.sort(
         key=lambda card: (
+            _card_query_relevance_score(query, card),
             int(card.get("authority_score", 0)),
             float(card.get("confidence", 0.0)),
         ),
@@ -150,17 +173,21 @@ def _curated_sources(state: OrchestratorState) -> list[str]:
     return [source for source in raw_sources if is_reference_usable(source) and not is_blocked_reference_url(source)]
 
 
-def _build_references_section(evidence_cards: list[dict], limit: int = 18) -> str:
-    unique_cards: list[dict] = []
-    seen_urls = set()
+def _build_references_section(evidence_cards: list[dict], reference_urls: list[str] | None = None, limit: int = 18) -> str:
+    unique_cards_by_url: dict[str, dict] = {}
     for card in evidence_cards:
-        source_url = card.get("source_url", "")
-        if not source_url or source_url in seen_urls:
-            continue
-        seen_urls.add(source_url)
-        unique_cards.append(card)
-        if len(unique_cards) >= limit:
-            break
+        source_url = str(card.get("source_url", "")).strip()
+        if source_url and source_url not in unique_cards_by_url:
+            unique_cards_by_url[source_url] = card
+
+    if reference_urls:
+        unique_cards = [
+            unique_cards_by_url[url]
+            for url in _dedupe_urls(reference_urls)
+            if url in unique_cards_by_url
+        ][:limit]
+    else:
+        unique_cards = list(unique_cards_by_url.values())[:limit]
 
     if not unique_cards:
         return "## References\n\n1. No validated references were available."
@@ -234,6 +261,11 @@ def _section_tokens(value: str) -> set[str]:
     return set(query_tokens(value.replace("_", " ")))
 
 
+def _card_has_quantitative_signal(card: dict) -> bool:
+    text = f"{card.get('claim', '')} {card.get('excerpt', '')}"
+    return bool(re.search(r"\d", text))
+
+
 def _section_relevance_score(section: str, card: dict) -> int:
     normalized_section = normalize_section_tag(section)
     card_tag = normalize_section_tag(card.get("section_tag", ""))
@@ -298,6 +330,63 @@ def _select_section_findings(section: str, findings: list[dict], evidence_cards:
     return [finding for _, _, finding in ranked[:limit]]
 
 
+def _extract_citation_labels(content: str) -> set[str]:
+    labels = set()
+    for label in re.findall(r"\[([^\]]+)\]", content):
+        cleaned = re.sub(r"\s+", " ", label.strip().lower())
+        if cleaned:
+            labels.add(cleaned)
+    return labels
+
+
+def _select_reference_urls_for_section(section_content: str, selected_cards: list[dict], fallback_limit: int = 2) -> list[str]:
+    citation_labels = _extract_citation_labels(section_content)
+    explicit_matches: list[str] = []
+
+    for card in selected_cards:
+        source_url = str(card.get("source_url", "")).strip()
+        title = re.sub(r"\s+", " ", str(card.get("source_title", "")).strip().lower())
+        if not source_url or not title:
+            continue
+        if any(title == label or title in label or label in title for label in citation_labels):
+            explicit_matches.append(source_url)
+
+    if explicit_matches:
+        return _dedupe_urls(explicit_matches)
+
+    return _dedupe_urls(
+        [str(card.get("source_url", "")).strip() for card in selected_cards[:fallback_limit] if card.get("source_url")]
+    )
+
+
+def _section_support_snapshot(section: str, evidence_cards: list[dict], limit: int = 8) -> dict:
+    selected_cards = _select_section_evidence(section, evidence_cards, limit=limit)
+    distinct_sources = {
+        str(card.get("source_url", "")).strip()
+        for card in selected_cards
+        if card.get("source_url")
+    }
+    quantitative_cards = sum(1 for card in selected_cards if _card_has_quantitative_signal(card))
+    top_authority = max((int(card.get("authority_score", 0)) for card in selected_cards), default=0)
+    return {
+        "selected_cards": selected_cards,
+        "card_count": len(selected_cards),
+        "distinct_sources": len(distinct_sources),
+        "quantitative_cards": quantitative_cards,
+        "top_authority": top_authority,
+    }
+
+
+def _section_is_ready_for_draft(section: str, evidence_cards: list[dict]) -> bool:
+    settings = get_settings()
+    snapshot = _section_support_snapshot(section, evidence_cards)
+    return (
+        snapshot["card_count"] >= 3
+        and snapshot["distinct_sources"] >= settings.min_sources_per_section
+        and (snapshot["quantitative_cards"] >= 1 or snapshot["top_authority"] >= 8)
+    )
+
+
 def _is_front_or_back_matter_section(section: str) -> bool:
     lowered = " ".join(section.lower().replace("&", " and ").split())
     exact_matches = {
@@ -328,6 +417,53 @@ def _filter_body_sections(sections: list[str], required_sections: list[str]) -> 
     if required_body_sections:
         return required_body_sections
     return _dedupe_items(sections)
+
+
+def _target_body_section_count(required_sections: list[str], evidence_cards: list[dict]) -> int:
+    distinct_sources = len(
+        {
+            str(card.get("source_url", "")).strip()
+            for card in evidence_cards
+            if card.get("source_url")
+        }
+    )
+    covered_tags = len(
+        {
+            normalize_section_tag(card.get("section_tag", ""))
+            for card in evidence_cards
+            if card.get("section_tag")
+        }
+    )
+    if len(evidence_cards) >= 22 or distinct_sources >= 10 or covered_tags >= 6:
+        return 6
+    if len(evidence_cards) >= 14 or distinct_sources >= 8 or covered_tags >= 4 or len(required_sections) >= 5:
+        return 5
+    return 4
+
+
+def _section_support_score(section: str, evidence_cards: list[dict]) -> int:
+    snapshot = _section_support_snapshot(section, evidence_cards)
+    ready_bonus = 100 if _section_is_ready_for_draft(section, evidence_cards) else 0
+    return (
+        ready_bonus
+        + snapshot["card_count"] * 8
+        + snapshot["distinct_sources"] * 10
+        + snapshot["quantitative_cards"] * 4
+        + snapshot["top_authority"]
+    )
+
+
+def _prioritize_outline_sections(sections: list[str], evidence_cards: list[dict], target_count: int) -> list[str]:
+    if len(sections) <= target_count:
+        return sections
+
+    ranked = [
+        (index, section, _section_support_score(section, evidence_cards))
+        for index, section in enumerate(sections)
+    ]
+    ranked.sort(key=lambda item: (item[2], -item[0]), reverse=True)
+    chosen = {section for _, section, _ in ranked[:target_count]}
+    return [section for section in sections if section in chosen]
 
 
 def _condense_section_for_editor(content: str, limit: int = 900) -> str:
@@ -429,7 +565,7 @@ async def evaluate_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
     findings = state.get("findings", [])
-    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
     required_sections = state.get("required_sections", [])
 
     distinct_sources = _dedupe_urls(
@@ -516,7 +652,8 @@ async def evaluate_node(state: OrchestratorState):
 async def build_outline_node(state: OrchestratorState):
     router = get_model_router()
     required_sections = state.get("required_sections", [])
-    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
+    target_section_count = _target_body_section_count(required_sections, evidence_cards)
     messages = [
         SystemMessage(content="You design comprehensive, publication-grade report outlines. Your outlines produce reports comparable to professional research firms and Gemini Deep Research."),
         HumanMessage(
@@ -524,15 +661,12 @@ async def build_outline_node(state: OrchestratorState):
                 f"User Query: {state['original_query']}\n\n"
                 f"Required Sections:\n{chr(10).join(f'- {section}' for section in required_sections)}\n\n"
                 f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=20)}\n\n"
-                "Create a COMPREHENSIVE report outline with 6-10 sections. The report must feel like a professional research document.\n\n"
+                f"Create ONLY {target_section_count} body sections for the report. The report must feel like a professional research document.\n\n"
                 "REQUIRED STRUCTURE:\n"
-                "1. Executive Summary / Overview (always first)\n"
-                "2-8. Detailed analytical sections covering all major angles of the query\n"
-                "   - Include sections for: market analysis, key players/stakeholders, data & statistics, \n"
-                "     trends & developments, policy/regulatory landscape, challenges & risks, \n"
-                "     comparative analysis, case studies (as applicable to the topic)\n"
-                "9. Future Outlook / Projections\n"
-                "10. Conclusion & Recommendations (always last)\n\n"
+                "- Return BODY sections only. Do not include Executive Summary, Overview, Conclusion, or References.\n"
+                "- Prioritize the most decision-useful sections and merge overlapping angles.\n"
+                "- Prefer fewer, stronger sections over broad shallow coverage.\n"
+                "- Every section must earn its place by being important and evidence-rich.\n\n"
                 "For market/industry topics: include market size, competitive landscape, pricing/business models, \n"
                 "infrastructure, policy tailwinds, investment trends, and regional analysis.\n"
                 "For technical/scientific topics: include methodology, current state, key findings, applications, limitations.\n"
@@ -547,9 +681,14 @@ async def build_outline_node(state: OrchestratorState):
         budget=RequestBudget(max_input_chars=get_settings_instance().planner_input_char_budget, max_output_tokens=500),
         trace_id=state["thread_id"],
     )
-    outline_sections = _filter_body_sections(
-        _dedupe_items(response.sections, max(len(required_sections) + 2, 8)),
+    body_section_candidates = _filter_body_sections(
+        _dedupe_items(response.sections, max(target_section_count + 2, 6)),
         required_sections,
+    )
+    outline_sections = _prioritize_outline_sections(
+        body_section_candidates,
+        evidence_cards,
+        target_section_count,
     )
     return {"outline_sections": outline_sections}
 
@@ -557,21 +696,17 @@ async def build_outline_node(state: OrchestratorState):
 async def draft_sections_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
-    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state))
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
     findings = state.get("findings", [])
     section_drafts: dict[str, str] = {}
 
     for section in state.get("outline_sections", []):
-        selected_cards = _select_section_evidence(section, evidence_cards, limit=18)
+        selected_cards = _select_section_evidence(section, evidence_cards, limit=12)
         supporting_findings = _select_section_findings(section, findings, selected_cards, limit=10)
-        if not selected_cards:
-            section_drafts[section] = (
-                "Validated evidence for this section was too thin or weakly matched to draft it confidently.\n\n"
-                "- Additional targeted research is required before making claims here."
-            )
+        if not _section_is_ready_for_draft(section, evidence_cards):
             continue
 
-        evidence_text = _format_evidence_cards(selected_cards, limit=18)
+        evidence_text = _format_evidence_cards(selected_cards, limit=12)
         messages = [
             SystemMessage(
                 content=(
@@ -586,20 +721,22 @@ async def draft_sections_node(state: OrchestratorState):
                     f"Section Title: {section}\n\n"
                     f"Relevant Evidence:\n{evidence_text}\n\n"
                     f"Supporting Findings:\n{_format_findings(supporting_findings, limit=10)}\n\n"
-                    "Write a DETAILED Markdown section (300-500 words minimum). Requirements:\n\n"
+                    "Write a DETAILED Markdown section (450-650 words). Requirements:\n\n"
                     "FORMAT & STRUCTURE:\n"
-                    "- Start with a brief contextual intro paragraph for this section\n"
-                    "- Use ### subheadings to organize complex information\n"
-                    "- Include Markdown TABLES where comparing data (players, pricing, metrics, timelines)\n"
-                    "- Use bullet lists for key takeaways or feature comparisons\n"
-                    "- End with a brief analytical insight or implication\n\n"
+                    "- Start with 2-3 sentences that directly explain why this section matters.\n"
+                    "- Use 2-4 ### subheadings to organize the analysis.\n"
+                    "- Include Markdown TABLES where comparing data (players, pricing, metrics, timelines).\n"
+                    "- Use bullet lists only when they improve clarity.\n"
+                    "- End with a brief implication or decision-oriented takeaway.\n\n"
                     "CONTENT QUALITY:\n"
-                    "- Include ALL specific numbers, dates, company names, and statistics from the evidence\n"
-                    "- Cite sources inline like [Source Name] when referencing specific data points\n"
-                    "- Analyze trends and relationships, don't just list facts\n"
-                    "- Compare and contrast when multiple data points exist\n"
-                    "- Note data gaps or uncertainty explicitly rather than making assumptions\n"
-                    "- NO generic filler phrases like 'significant growth' or 'various factors' — be specific"
+                    "- Focus on the most important and best-supported insights, not background filler.\n"
+                    "- Include ALL specific numbers, dates, company names, and statistics from the evidence.\n"
+                    "- Cite sources inline using the exact source title in brackets, like [Source Name].\n"
+                    "- Analyze trends, tradeoffs, and relationships; do not just list facts.\n"
+                    "- Compare and contrast when multiple data points exist.\n"
+                    "- Call out uncertainty, contradictions, or missing evidence explicitly.\n"
+                    "- Include at least one concrete comparison, ranking, or chronology when the evidence allows it.\n"
+                    "- NO generic filler phrases like 'significant growth' or 'various factors' — be specific."
                 )
             ),
         ]
@@ -621,19 +758,24 @@ async def final_edit_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
     sources = _curated_sources(state)
-    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources)
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources, state["original_query"])
     section_drafts = state.get("section_drafts", {})
+
+    report_reference_urls: list[str] = []
+    for section, content in section_drafts.items():
+        selected_cards = _select_section_evidence(section, evidence_cards, limit=12)
+        report_reference_urls.extend(_select_reference_urls_for_section(content, selected_cards))
 
     # Programmatic Assembly: We don't want the LLM to rewrite these sections as it will
     # inevitably compress and summarize them. We want the full depth.
     draft_text_formatted = "\n\n".join(f"## {title}\n{content}" for title, content in section_drafts.items())
-    reference_section = _build_references_section(evidence_cards)
+    reference_section = _build_references_section(evidence_cards, reference_urls=report_reference_urls)
 
     report_title = state["original_query"].title()
     if len(report_title) > 60:
         report_title = "Deep Research Report"
 
-    if not evidence_cards:
+    if not evidence_cards or not section_drafts:
         return {
             "final_report": _build_insufficient_evidence_report(
                 report_title,
