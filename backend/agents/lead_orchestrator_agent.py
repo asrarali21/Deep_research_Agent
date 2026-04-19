@@ -30,6 +30,7 @@ from services.source_quality import (
 class OrchestratorState(TypedDict):
     thread_id: str
     original_query: str
+    depth_profile: str
     research_plan: list[str]
     required_sections: list[str]
     pending_tasks: list[str]
@@ -44,9 +45,25 @@ class OrchestratorState(TypedDict):
     gaps: list[str]
     quality_summary: str
     evaluation_rounds: int
+    targeted_gap_rounds: int
     outline_sections: list[str]
+    section_packets: list[dict]
+    priority_sections: list[str]
     section_drafts: dict[str, str]
+    report_reference_urls: list[str]
     final_report: str
+
+
+class SectionPacket(TypedDict):
+    section: str
+    importance_score: int
+    selected_cards: list[dict]
+    selected_findings: list[dict]
+    distinct_source_count: int
+    quantitative_fact_count: int
+    reference_urls: list[str]
+    required_elements: list[str]
+    ready_for_draft: bool
 
 
 class DecomposePlan(BaseModel):
@@ -221,12 +238,13 @@ def _section_to_source_map(evidence_cards: list[dict]) -> dict[str, set[str]]:
 
 def _find_missing_sections(required_sections: list[str], evidence_cards: list[dict]) -> list[str]:
     settings = get_settings()
+    min_sources = max(settings.min_sources_per_section, settings.min_distinct_sources_per_draftable_section)
     source_map = _section_to_source_map(evidence_cards)
     missing = []
     for section in required_sections:
         normalized = normalize_section_tag(section)
         support_count = len(source_map.get(normalized, set()))
-        if support_count < settings.min_sources_per_section:
+        if support_count < min_sources:
             missing.append(section)
     return missing
 
@@ -261,9 +279,87 @@ def _section_tokens(value: str) -> set[str]:
     return set(query_tokens(value.replace("_", " ")))
 
 
+def _query_complexity_score(query: str, required_sections: list[str]) -> int:
+    lowered = query.lower()
+    broad_markers = sum(
+        1
+        for marker in (
+            "market",
+            "industry",
+            "global",
+            "ecosystem",
+            "landscape",
+            "pricing",
+            "adoption",
+            "competition",
+            "deployment",
+            "policy",
+            "regulation",
+            "forecast",
+            "trend",
+            "challenge",
+            "risk",
+            "opportunity",
+            "compare",
+            "versus",
+            "vs",
+        )
+        if marker in lowered
+    )
+    return len(query_tokens(query)) + len(required_sections) * 2 + broad_markers
+
+
 def _card_has_quantitative_signal(card: dict) -> bool:
     text = f"{card.get('claim', '')} {card.get('excerpt', '')}"
     return bool(re.search(r"\d", text))
+
+
+def _section_requires_quantitative_support(section: str) -> bool:
+    return bool(
+        _section_tokens(section)
+        & {
+            "market",
+            "size",
+            "pricing",
+            "price",
+            "prices",
+            "cost",
+            "costs",
+            "growth",
+            "adoption",
+            "revenue",
+            "ranking",
+            "rankings",
+            "benchmark",
+            "benchmarks",
+            "timeline",
+            "timelines",
+            "forecast",
+            "forecasts",
+            "investment",
+            "investments",
+            "funding",
+            "deployment",
+            "deployments",
+        }
+    )
+
+
+def _section_required_elements(section: str, selected_cards: list[dict]) -> list[str]:
+    elements = [
+        "why this section matters",
+        "concrete facts and numbers",
+        "comparison or tradeoff",
+        "uncertainty or contradiction",
+        "implication or recommendation",
+    ]
+    if _section_requires_quantitative_support(section):
+        elements.append("quantitative benchmark or timeline")
+    elif any(re.search(r"\b20\d{2}\b", f"{card.get('claim', '')} {card.get('excerpt', '')}") for card in selected_cards):
+        elements.append("chronology or timeline")
+    if _section_tokens(section) & {"risk", "risks", "challenge", "challenges", "barrier", "barriers", "limitation", "limitations"}:
+        elements.append("risks and mitigation")
+    return elements
 
 
 def _section_relevance_score(section: str, card: dict) -> int:
@@ -380,10 +476,16 @@ def _section_support_snapshot(section: str, evidence_cards: list[dict], limit: i
 def _section_is_ready_for_draft(section: str, evidence_cards: list[dict]) -> bool:
     settings = get_settings()
     snapshot = _section_support_snapshot(section, evidence_cards)
+    min_sources = max(settings.min_sources_per_section, settings.min_distinct_sources_per_draftable_section)
+    if snapshot["card_count"] < settings.min_evidence_cards_per_draftable_section:
+        return False
+    if snapshot["distinct_sources"] < min_sources:
+        return False
+    if _section_requires_quantitative_support(section):
+        return snapshot["quantitative_cards"] >= settings.min_quant_signals_for_numeric_sections
     return (
-        snapshot["card_count"] >= 3
-        and snapshot["distinct_sources"] >= settings.min_sources_per_section
-        and (snapshot["quantitative_cards"] >= 1 or snapshot["top_authority"] >= 8)
+        snapshot["quantitative_cards"] >= 1
+        or snapshot["top_authority"] >= 8
     )
 
 
@@ -419,7 +521,24 @@ def _filter_body_sections(sections: list[str], required_sections: list[str]) -> 
     return _dedupe_items(sections)
 
 
-def _target_body_section_count(required_sections: list[str], evidence_cards: list[dict]) -> int:
+def _sections_overlap(left: str, right: str) -> bool:
+    left_normalized = normalize_section_tag(left)
+    right_normalized = normalize_section_tag(right)
+    if not left_normalized or not right_normalized:
+        return False
+    if left_normalized == right_normalized:
+        return True
+    if left_normalized in right_normalized or right_normalized in left_normalized:
+        return True
+    left_tokens = _section_tokens(left)
+    right_tokens = _section_tokens(right)
+    overlap = left_tokens & right_tokens
+    smaller = min(len(left_tokens), len(right_tokens))
+    return smaller > 0 and len(overlap) >= max(2, smaller - 1)
+
+
+def _target_body_section_count(query: str, required_sections: list[str], evidence_cards: list[dict]) -> int:
+    settings = get_settings()
     distinct_sources = len(
         {
             str(card.get("source_url", "")).strip()
@@ -434,11 +553,25 @@ def _target_body_section_count(required_sections: list[str], evidence_cards: lis
             if card.get("section_tag")
         }
     )
-    if len(evidence_cards) >= 22 or distinct_sources >= 10 or covered_tags >= 6:
-        return 6
-    if len(evidence_cards) >= 14 or distinct_sources >= 8 or covered_tags >= 4 or len(required_sections) >= 5:
-        return 5
-    return 4
+    complexity_score = _query_complexity_score(query, required_sections)
+    target_count = settings.min_body_sections_default
+
+    if (
+        complexity_score >= 18
+        and len(evidence_cards) >= settings.min_body_sections_default * settings.min_evidence_cards_per_draftable_section
+        and distinct_sources >= settings.min_body_sections_default + 1
+        and covered_tags >= settings.min_body_sections_default
+    ):
+        target_count += 1
+    if (
+        complexity_score >= 24
+        and len(evidence_cards) >= settings.min_body_sections_default * settings.min_evidence_cards_per_draftable_section + 6
+        and distinct_sources >= settings.min_body_sections_default + 3
+        and covered_tags >= settings.min_body_sections_default + 1
+    ):
+        target_count += 1
+
+    return max(settings.min_body_sections_default, min(settings.max_body_sections_deep, target_count))
 
 
 def _section_support_score(section: str, evidence_cards: list[dict]) -> int:
@@ -454,16 +587,103 @@ def _section_support_score(section: str, evidence_cards: list[dict]) -> int:
 
 
 def _prioritize_outline_sections(sections: list[str], evidence_cards: list[dict], target_count: int) -> list[str]:
-    if len(sections) <= target_count:
-        return sections
-
     ranked = [
         (index, section, _section_support_score(section, evidence_cards))
         for index, section in enumerate(sections)
     ]
     ranked.sort(key=lambda item: (item[2], -item[0]), reverse=True)
-    chosen = {section for _, section, _ in ranked[:target_count]}
-    return [section for section in sections if section in chosen]
+
+    chosen: list[str] = []
+    for _, section, _ in ranked:
+        if any(_sections_overlap(section, existing) for existing in chosen):
+            continue
+        chosen.append(section)
+        if len(chosen) >= target_count:
+            break
+
+    return [section for section in sections if section in chosen][:target_count]
+
+
+def _build_section_packet(section: str, query: str, findings: list[dict], evidence_cards: list[dict]) -> SectionPacket:
+    selected_cards = _select_section_evidence(section, evidence_cards, limit=12)
+    selected_findings = _select_section_findings(section, findings, selected_cards, limit=10)
+    distinct_source_count = len(
+        {
+            str(card.get("source_url", "")).strip()
+            for card in selected_cards
+            if card.get("source_url")
+        }
+    )
+    quantitative_fact_count = sum(1 for card in selected_cards if _card_has_quantitative_signal(card))
+    importance_score = (
+        _section_support_score(section, evidence_cards)
+        + len(_section_tokens(section) & _section_tokens(query)) * 6
+        + (8 if _section_requires_quantitative_support(section) else 0)
+    )
+    reference_urls = _dedupe_urls(
+        [
+            str(card.get("source_url", "")).strip()
+            for card in selected_cards
+            if card.get("source_url")
+        ]
+    )
+    return {
+        "section": section,
+        "importance_score": importance_score,
+        "selected_cards": selected_cards,
+        "selected_findings": selected_findings,
+        "distinct_source_count": distinct_source_count,
+        "quantitative_fact_count": quantitative_fact_count,
+        "reference_urls": reference_urls,
+        "required_elements": _section_required_elements(section, selected_cards),
+        "ready_for_draft": _section_is_ready_for_draft(section, evidence_cards),
+    }
+
+
+def _build_section_packets(sections: list[str], query: str, findings: list[dict], evidence_cards: list[dict]) -> list[SectionPacket]:
+    return [_build_section_packet(section, query, findings, evidence_cards) for section in sections]
+
+
+def _supported_section_packets(section_packets: list[SectionPacket]) -> list[SectionPacket]:
+    return [packet for packet in section_packets if packet.get("ready_for_draft")]
+
+
+def _select_priority_sections(section_packets: list[SectionPacket]) -> list[str]:
+    settings = get_settings()
+    ranked = sorted(
+        _supported_section_packets(section_packets),
+        key=lambda packet: (
+            int(packet.get("importance_score", 0)),
+            int(packet.get("quantitative_fact_count", 0)),
+            int(packet.get("distinct_source_count", 0)),
+        ),
+        reverse=True,
+    )
+    return [str(packet.get("section", "")) for packet in ranked[: settings.priority_section_count]]
+
+
+def _build_targeted_gap_tasks(section_packets: list[SectionPacket], target_count: int) -> list[str]:
+    settings = get_settings()
+    supported_count = len(_supported_section_packets(section_packets))
+    needed = max(0, target_count - supported_count)
+    if needed == 0:
+        return []
+
+    unsupported = [
+        packet
+        for packet in sorted(section_packets, key=lambda item: int(item.get("importance_score", 0)), reverse=True)
+        if not packet.get("ready_for_draft")
+    ]
+    gap_tasks: list[str] = []
+    for packet in unsupported[: min(settings.max_gap_tasks_per_round, needed + 1)]:
+        section = str(packet.get("section", "")).strip()
+        if not section:
+            continue
+        requirement = "Add specific numbers, dates, rankings, pricing, adoption, or timeline evidence."
+        if not _section_requires_quantitative_support(section):
+            requirement = "Add multiple authoritative sources and concrete supporting details."
+        gap_tasks.append(f"Collect stronger evidence for section '{section}'. {requirement}")
+    return gap_tasks
 
 
 def _condense_section_for_editor(content: str, limit: int = 900) -> str:
@@ -471,6 +691,36 @@ def _condense_section_for_editor(content: str, limit: int = 900) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit].rsplit(" ", 1)[0].rstrip() + "..."
+
+
+def _report_has_deep_evidence_coverage(
+    query: str,
+    required_sections: list[str],
+    evidence_cards: list[dict],
+    distinct_sources: list[str],
+    authoritative_source_count: int,
+) -> bool:
+    settings = get_settings()
+    target_cards = max(
+        settings.min_evidence_cards_for_report,
+        settings.min_body_sections_default * settings.min_evidence_cards_per_draftable_section,
+    )
+    section_like_support = sum(
+        1
+        for section in _dedupe_items(required_sections, settings.max_body_sections_deep)
+        if _section_is_ready_for_draft(section, evidence_cards)
+    )
+    depth_floor = min(
+        settings.min_body_sections_default,
+        max(4, len(_dedupe_items(required_sections, settings.max_body_sections_deep))),
+    )
+    return (
+        len(distinct_sources) >= max(settings.min_distinct_sources_for_report, settings.min_body_sections_default + 1)
+        and authoritative_source_count >= settings.min_authoritative_sources_for_report
+        and len(evidence_cards) >= target_cards
+        and section_like_support >= depth_floor
+        and _target_body_section_count(query, required_sections, evidence_cards) >= settings.min_body_sections_default
+    )
 
 
 def _build_insufficient_evidence_report(title: str, quality_summary: str, reference_section: str) -> str:
@@ -527,9 +777,13 @@ async def decompose_node(state: OrchestratorState):
         trace_id=state["thread_id"],
     )
     safe_tasks = _dedupe_items(response.tasks, settings.max_initial_tasks)
-    required_sections = _dedupe_items(response.required_sections, max(5, settings.max_initial_tasks + 2))
+    required_sections = _dedupe_items(
+        response.required_sections,
+        max(settings.min_body_sections_default + 1, settings.max_initial_tasks + 2),
+    )
 
     return {
+        "depth_profile": "deep",
         "research_plan": safe_tasks,
         "required_sections": required_sections,
         "pending_tasks": safe_tasks,
@@ -537,8 +791,12 @@ async def decompose_node(state: OrchestratorState):
         "gaps": [],
         "human_feedback": "",
         "quality_summary": "",
+        "targeted_gap_rounds": 0,
         "outline_sections": [],
+        "section_packets": [],
+        "priority_sections": [],
         "section_drafts": {},
+        "report_reference_urls": [],
     }
 
 
@@ -581,23 +839,25 @@ async def evaluate_node(state: OrchestratorState):
         }
     )
     missing_sections = _find_missing_sections(required_sections, evidence_cards)
-    code_gate_passed = (
-        len(distinct_sources) >= settings.min_distinct_sources_for_report
-        and authoritative_source_count >= settings.min_authoritative_sources_for_report
-        and len(evidence_cards) >= settings.min_evidence_cards_for_report
-        and not missing_sections
-    )
+    code_gate_passed = _report_has_deep_evidence_coverage(
+        state["original_query"],
+        required_sections,
+        evidence_cards,
+        distinct_sources,
+        authoritative_source_count,
+    ) and not missing_sections
 
     messages = [
         SystemMessage(
             content=(
                 "You evaluate whether research results are complete and identify only material gaps. "
-                "Be strict. Do not approve shallow evidence."
+                "Be strict. Do not approve shallow evidence or reports that would collapse into only a few thin sections."
             )
         ),
         HumanMessage(
             content=(
                 f"User Query: {state['original_query']}\n\n"
+                f"Depth Profile: {state.get('depth_profile', 'deep')}\n"
                 f"Required Report Sections:\n{chr(10).join(f'- {section}' for section in required_sections) or '- None provided'}\n\n"
                 f"Distinct Sources Collected: {len(distinct_sources)}\n"
                 f"Authoritative Source Count: {authoritative_source_count}\n"
@@ -605,7 +865,7 @@ async def evaluate_node(state: OrchestratorState):
                 f"Missing Sections by Deterministic Check:\n{chr(10).join(f'- {section}' for section in missing_sections) or '- None'}\n\n"
                 f"Collected Findings:\n{_format_findings(findings)}\n\n"
                 f"Collected Evidence:\n{_format_evidence_cards(evidence_cards)}\n\n"
-                "Decide whether the answer is complete. For broad advice or research requests, do not mark complete if the evidence is shallow, repetitive, or based on too few distinct or authoritative sources. "
+                "Decide whether the answer is complete. For broad advice or research requests, do not mark complete if the evidence is shallow, repetitive, based on too few distinct or authoritative sources, or insufficient to support at least six strong body sections. "
                 "If not complete, provide only the most important missing questions and sections. Reject generic market-analysis filler, vague statements, or unsupported competitor claims."
             )
         ),
@@ -637,6 +897,7 @@ async def evaluate_node(state: OrchestratorState):
         f"distinct_sources={len(distinct_sources)}",
         f"authoritative_sources={authoritative_source_count}",
         f"evidence_cards={len(evidence_cards)}",
+        f"depth_profile={state.get('depth_profile', 'deep')}",
     ]
     if combined_missing_sections:
         quality_summary_parts.append(f"missing_sections={', '.join(combined_missing_sections)}")
@@ -650,10 +911,13 @@ async def evaluate_node(state: OrchestratorState):
 
 
 async def build_outline_node(state: OrchestratorState):
+    settings = get_settings()
     router = get_model_router()
     required_sections = state.get("required_sections", [])
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
-    target_section_count = _target_body_section_count(required_sections, evidence_cards)
+    findings = state.get("findings", [])
+    target_section_count = _target_body_section_count(state["original_query"], required_sections, evidence_cards)
+    candidate_count = min(settings.max_body_sections_deep + 2, target_section_count + 2)
     messages = [
         SystemMessage(content="You design comprehensive, publication-grade report outlines. Your outlines produce reports comparable to professional research firms and Gemini Deep Research."),
         HumanMessage(
@@ -661,11 +925,12 @@ async def build_outline_node(state: OrchestratorState):
                 f"User Query: {state['original_query']}\n\n"
                 f"Required Sections:\n{chr(10).join(f'- {section}' for section in required_sections)}\n\n"
                 f"Evidence Snapshot:\n{_format_evidence_cards(evidence_cards, limit=20)}\n\n"
-                f"Create ONLY {target_section_count} body sections for the report. The report must feel like a professional research document.\n\n"
+                f"Create {candidate_count} candidate body sections for the report. The report must feel like a professional research document.\n\n"
                 "REQUIRED STRUCTURE:\n"
                 "- Return BODY sections only. Do not include Executive Summary, Overview, Conclusion, or References.\n"
-                "- Prioritize the most decision-useful sections and merge overlapping angles.\n"
-                "- Prefer fewer, stronger sections over broad shallow coverage.\n"
+                "- Prioritize the most decision-useful sections and merge overlapping angles aggressively.\n"
+                f"- The final report will keep the best-supported {target_section_count} sections, so propose sections with enough substance to survive that cut.\n"
+                "- Prefer deep coverage over broad shallow coverage.\n"
                 "- Every section must earn its place by being important and evidence-rich.\n\n"
                 "For market/industry topics: include market size, competitive landscape, pricing/business models, \n"
                 "infrastructure, policy tailwinds, investment trends, and regional analysis.\n"
@@ -682,7 +947,7 @@ async def build_outline_node(state: OrchestratorState):
         trace_id=state["thread_id"],
     )
     body_section_candidates = _filter_body_sections(
-        _dedupe_items(response.sections, max(target_section_count + 2, 6)),
+        _dedupe_items(response.sections + required_sections, max(candidate_count + 2, settings.min_body_sections_default + 2)),
         required_sections,
     )
     outline_sections = _prioritize_outline_sections(
@@ -690,7 +955,65 @@ async def build_outline_node(state: OrchestratorState):
         evidence_cards,
         target_section_count,
     )
-    return {"outline_sections": outline_sections}
+    section_packets = _build_section_packets(outline_sections, state["original_query"], findings, evidence_cards)
+    supported_packets = _supported_section_packets(section_packets)
+    priority_sections = _select_priority_sections(section_packets)
+    targeted_gap_rounds = state.get("targeted_gap_rounds", 0)
+    targeted_gap_tasks: list[str] = []
+    quality_summary = state.get("quality_summary", "")
+
+    if len(supported_packets) < settings.min_body_sections_default:
+        targeted_gap_tasks = _build_targeted_gap_tasks(section_packets, settings.min_body_sections_default)
+        if targeted_gap_tasks and targeted_gap_rounds < settings.max_targeted_gap_rounds_deep:
+            targeted_gap_rounds += 1
+            quality_summary = " | ".join(
+                part
+                for part in (
+                    quality_summary.strip(),
+                    f"supported_sections={len(supported_packets)}/{settings.min_body_sections_default}",
+                    f"targeted_gap_round={targeted_gap_rounds}",
+                    "status=collecting_section_specific_depth",
+                )
+                if part
+            )
+            return {
+                "gaps": targeted_gap_tasks,
+                "pending_tasks": [f"Supplemental Gap Research: {gap}" for gap in targeted_gap_tasks],
+                "targeted_gap_rounds": targeted_gap_rounds,
+                "quality_summary": quality_summary,
+                "outline_sections": [],
+                "section_packets": section_packets,
+                "priority_sections": priority_sections,
+            }
+
+        quality_summary = " | ".join(
+            part
+            for part in (
+                quality_summary.strip(),
+                f"supported_sections={len(supported_packets)}/{settings.min_body_sections_default}",
+                "status=insufficient_supported_sections_for_deep_report",
+            )
+            if part
+        )
+        return {
+            "gaps": [],
+            "pending_tasks": [],
+            "quality_summary": quality_summary,
+            "outline_sections": [],
+            "section_packets": section_packets,
+            "priority_sections": priority_sections,
+        }
+
+    supported_sections = [packet["section"] for packet in supported_packets][:target_section_count]
+    supported_packets = [packet for packet in section_packets if packet["section"] in supported_sections]
+    priority_sections = [section for section in priority_sections if section in supported_sections]
+    return {
+        "gaps": [],
+        "pending_tasks": [],
+        "outline_sections": supported_sections,
+        "section_packets": supported_packets,
+        "priority_sections": priority_sections,
+    }
 
 
 async def draft_sections_node(state: OrchestratorState):
@@ -698,15 +1021,26 @@ async def draft_sections_node(state: OrchestratorState):
     router = get_model_router()
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
     findings = state.get("findings", [])
+    section_packets = state.get("section_packets", [])
+    packet_by_section = {
+        str(packet.get("section", "")): packet
+        for packet in section_packets
+        if str(packet.get("section", "")).strip()
+    }
     section_drafts: dict[str, str] = {}
 
     for section in state.get("outline_sections", []):
-        selected_cards = _select_section_evidence(section, evidence_cards, limit=12)
-        supporting_findings = _select_section_findings(section, findings, selected_cards, limit=10)
-        if not _section_is_ready_for_draft(section, evidence_cards):
+        packet = packet_by_section.get(section)
+        if packet is None:
+            packet = _build_section_packet(section, state["original_query"], findings, evidence_cards)
+        if not packet.get("ready_for_draft"):
             continue
+        selected_cards = list(packet.get("selected_cards", []))
+        supporting_findings = list(packet.get("selected_findings", []))
 
         evidence_text = _format_evidence_cards(selected_cards, limit=12)
+        required_elements_text = "\n".join(f"- {item}" for item in packet.get("required_elements", []))
+        base_target = settings.base_section_word_target
         messages = [
             SystemMessage(
                 content=(
@@ -721,10 +1055,11 @@ async def draft_sections_node(state: OrchestratorState):
                     f"Section Title: {section}\n\n"
                     f"Relevant Evidence:\n{evidence_text}\n\n"
                     f"Supporting Findings:\n{_format_findings(supporting_findings, limit=10)}\n\n"
-                    "Write a DETAILED Markdown section (450-650 words). Requirements:\n\n"
+                    f"Required Analytical Elements:\n{required_elements_text}\n\n"
+                    f"Write a DETAILED Markdown section ({max(700, base_target - 150)}-{base_target + 150} words). Requirements:\n\n"
                     "FORMAT & STRUCTURE:\n"
                     "- Start with 2-3 sentences that directly explain why this section matters.\n"
-                    "- Use 2-4 ### subheadings to organize the analysis.\n"
+                    "- Use 3-5 ### subheadings to organize the analysis.\n"
                     "- Include Markdown TABLES where comparing data (players, pricing, metrics, timelines).\n"
                     "- Use bullet lists only when they improve clarity.\n"
                     "- End with a brief implication or decision-oriented takeaway.\n\n"
@@ -735,7 +1070,7 @@ async def draft_sections_node(state: OrchestratorState):
                     "- Analyze trends, tradeoffs, and relationships; do not just list facts.\n"
                     "- Compare and contrast when multiple data points exist.\n"
                     "- Call out uncertainty, contradictions, or missing evidence explicitly.\n"
-                    "- Include at least one concrete comparison, ranking, or chronology when the evidence allows it.\n"
+                    "- Include at least one concrete comparison, ranking, chronology, or stakeholder contrast when the evidence allows it.\n"
                     "- NO generic filler phrases like 'significant growth' or 'various factors' — be specific."
                 )
             ),
@@ -754,17 +1089,96 @@ async def draft_sections_node(state: OrchestratorState):
     return {"section_drafts": section_drafts}
 
 
+async def expand_priority_sections_node(state: OrchestratorState):
+    settings = get_settings()
+    router = get_model_router()
+    evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), _curated_sources(state), state["original_query"])
+    findings = state.get("findings", [])
+    section_drafts = dict(state.get("section_drafts", {}))
+    packet_by_section = {
+        str(packet.get("section", "")): packet
+        for packet in state.get("section_packets", [])
+        if str(packet.get("section", "")).strip()
+    }
+
+    for section in state.get("priority_sections", []):
+        current_draft = section_drafts.get(section, "").strip()
+        if not current_draft:
+            continue
+
+        packet = packet_by_section.get(section)
+        if packet is None:
+            packet = _build_section_packet(section, state["original_query"], findings, evidence_cards)
+        if not packet.get("ready_for_draft"):
+            continue
+
+        selected_cards = list(packet.get("selected_cards", []))
+        supporting_findings = list(packet.get("selected_findings", []))
+        evidence_text = _format_evidence_cards(selected_cards, limit=12)
+        required_elements_text = "\n".join(f"- {item}" for item in packet.get("required_elements", []))
+        priority_target = settings.priority_section_word_target
+        messages = [
+            SystemMessage(
+                content=(
+                    "You deepen an already strong research section without adding unsupported claims. "
+                    "Your job is to make the section feel like a true deep-research deliverable: denser, more comparative, "
+                    "more explicit about uncertainty, and more useful for decision-making."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"User Query: {state['original_query']}\n\n"
+                    f"Section Title: {section}\n\n"
+                    f"Current Draft:\n{current_draft}\n\n"
+                    f"Relevant Evidence:\n{evidence_text}\n\n"
+                    f"Supporting Findings:\n{_format_findings(supporting_findings, limit=10)}\n\n"
+                    f"Required Analytical Elements:\n{required_elements_text}\n\n"
+                    f"Expand this section to approximately {max(1100, priority_target - 150)}-{priority_target + 150} words.\n\n"
+                    "EXPANSION RULES:\n"
+                    "- Preserve all validated facts and existing inline citations.\n"
+                    "- Add depth, not fluff.\n"
+                    "- Strengthen comparisons, chronologies, stakeholder contrasts, and counterpoints where supported.\n"
+                    "- Add or improve a Markdown table if it helps compare metrics, vendors, timelines, or tradeoffs.\n"
+                    "- Surface uncertainty, contradictory signals, and practical implications explicitly.\n"
+                    "- Do not introduce claims that are not grounded in the evidence provided."
+                )
+            ),
+        ]
+        response = await router.generate_text(
+            task_type="synthesis",
+            messages=messages,
+            budget=RequestBudget(
+                max_input_chars=min(get_settings_instance().synthesis_input_char_budget, 28000),
+                max_output_tokens=settings.section_draft_output_tokens,
+            ),
+            trace_id=state["thread_id"],
+        )
+        section_drafts[section] = response.content
+
+    return {"section_drafts": section_drafts}
+
+
 async def final_edit_node(state: OrchestratorState):
     settings = get_settings()
     router = get_model_router()
     sources = _curated_sources(state)
     evidence_cards = _curate_evidence_cards(state.get("evidence_cards", []), sources, state["original_query"])
     section_drafts = state.get("section_drafts", {})
+    packet_by_section = {
+        str(packet.get("section", "")): packet
+        for packet in state.get("section_packets", [])
+        if str(packet.get("section", "")).strip()
+    }
 
     report_reference_urls: list[str] = []
     for section, content in section_drafts.items():
-        selected_cards = _select_section_evidence(section, evidence_cards, limit=12)
+        selected_cards = list(packet_by_section.get(section, {}).get("selected_cards", [])) or _select_section_evidence(
+            section,
+            evidence_cards,
+            limit=12,
+        )
         report_reference_urls.extend(_select_reference_urls_for_section(content, selected_cards))
+    report_reference_urls = _dedupe_urls(report_reference_urls)
 
     # Programmatic Assembly: We don't want the LLM to rewrite these sections as it will
     # inevitably compress and summarize them. We want the full depth.
@@ -777,6 +1191,7 @@ async def final_edit_node(state: OrchestratorState):
 
     if not evidence_cards or not section_drafts:
         return {
+            "report_reference_urls": report_reference_urls,
             "final_report": _build_insufficient_evidence_report(
                 report_title,
                 state.get("quality_summary", ""),
@@ -852,7 +1267,10 @@ async def final_edit_node(state: OrchestratorState):
     final_report += f"## Conclusion & Future Outlook\n\n{conclusion}\n\n"
     final_report += f"{reference_section}"
 
-    return {"final_report": final_report}
+    return {
+        "report_reference_urls": report_reference_urls,
+        "final_report": final_report,
+    }
 
 
 def route_human_approval(state: OrchestratorState):
@@ -902,6 +1320,14 @@ def route_evaluation(state: OrchestratorState):
     return "build_outline_node"
 
 
+def route_after_outline(state: OrchestratorState):
+    if state.get("pending_tasks"):
+        return "dispatch_tasks_node"
+    if state.get("outline_sections"):
+        return "draft_sections_node"
+    return "final_edit_node"
+
+
 def create_lead_orchestrator(checkpointer=None):
     builder = StateGraph(OrchestratorState)
 
@@ -913,6 +1339,7 @@ def create_lead_orchestrator(checkpointer=None):
     builder.add_node("evaluate_node", evaluate_node)
     builder.add_node("build_outline_node", build_outline_node)
     builder.add_node("draft_sections_node", draft_sections_node)
+    builder.add_node("expand_priority_sections_node", expand_priority_sections_node)
     builder.add_node("final_edit_node", final_edit_node)
 
     builder.add_edge(START, "decompose_node")
@@ -922,8 +1349,9 @@ def create_lead_orchestrator(checkpointer=None):
     builder.add_edge("sub_agent", "post_batch_node")
     builder.add_conditional_edges("post_batch_node", route_after_batch)
     builder.add_conditional_edges("evaluate_node", route_evaluation)
-    builder.add_edge("build_outline_node", "draft_sections_node")
-    builder.add_edge("draft_sections_node", "final_edit_node")
+    builder.add_conditional_edges("build_outline_node", route_after_outline)
+    builder.add_edge("draft_sections_node", "expand_priority_sections_node")
+    builder.add_edge("expand_priority_sections_node", "final_edit_node")
     builder.add_edge("final_edit_node", END)
 
     return builder.compile(

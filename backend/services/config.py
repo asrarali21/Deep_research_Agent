@@ -50,6 +50,15 @@ class Settings:
     min_authoritative_sources_for_report: int
     min_evidence_cards_for_report: int
     min_sources_per_section: int
+    min_body_sections_default: int
+    max_body_sections_deep: int
+    base_section_word_target: int
+    priority_section_word_target: int
+    priority_section_count: int
+    min_evidence_cards_per_draftable_section: int
+    min_distinct_sources_per_draftable_section: int
+    min_quant_signals_for_numeric_sections: int
+    max_targeted_gap_rounds_deep: int
     provider_cooldown_seconds: int
     quota_cooldown_seconds: int
     rate_limit_max_cooldown_seconds: int
@@ -131,6 +140,15 @@ def get_settings() -> Settings:
         min_authoritative_sources_for_report=_int("MIN_AUTHORITATIVE_SOURCES_FOR_REPORT", 3),
         min_evidence_cards_for_report=_int("MIN_EVIDENCE_CARDS_FOR_REPORT", 8),
         min_sources_per_section=_int("MIN_SOURCES_PER_SECTION", 2),
+        min_body_sections_default=_int("MIN_BODY_SECTIONS_DEFAULT", 6),
+        max_body_sections_deep=_int("MAX_BODY_SECTIONS_DEEP", 8),
+        base_section_word_target=_int("BASE_SECTION_WORD_TARGET", 850),
+        priority_section_word_target=_int("PRIORITY_SECTION_WORD_TARGET", 1200),
+        priority_section_count=_int("PRIORITY_SECTION_COUNT", 2),
+        min_evidence_cards_per_draftable_section=_int("MIN_EVIDENCE_CARDS_PER_DRAFTABLE_SECTION", 3),
+        min_distinct_sources_per_draftable_section=_int("MIN_DISTINCT_SOURCES_PER_DRAFTABLE_SECTION", 2),
+        min_quant_signals_for_numeric_sections=_int("MIN_QUANT_SIGNALS_FOR_NUMERIC_SECTIONS", 1),
+        max_targeted_gap_rounds_deep=_int("MAX_TARGETED_GAP_ROUNDS_DEEP", 1),
         # --- Provider resilience timers ---
         # Cooldown after a confirmed rate-limit 429 from the provider API
         provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 20),

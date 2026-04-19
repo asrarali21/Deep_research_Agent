@@ -4,12 +4,15 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from agents.lead_orchestrator_agent import (
+    _build_section_packets,
     _build_references_section,
     _filter_body_sections,
     _find_missing_sections,
     _prioritize_outline_sections,
+    _select_priority_sections,
     _section_is_ready_for_draft,
     _select_section_evidence,
+    _target_body_section_count,
     route_batch_dispatch,
 )
 from agents.sub_agent import Finding, _finding_to_dict
@@ -130,14 +133,27 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "thread_id": "thread-123",
                 "original_query": "query",
+                "depth_profile": "deep",
                 "research_plan": ["Task A"],
+                "required_sections": [],
                 "pending_tasks": [],
                 "current_batch": ["Task A"],
                 "human_feedback": "",
                 "findings": [],
+                "evidence_cards": [],
                 "sources": [],
+                "discovered_sources": [],
+                "coverage_tags": [],
+                "completed_tasks": [],
                 "gaps": [],
+                "quality_summary": "",
                 "evaluation_rounds": 0,
+                "targeted_gap_rounds": 0,
+                "outline_sections": [],
+                "section_packets": [],
+                "priority_sections": [],
+                "section_drafts": {},
+                "report_reference_urls": [],
                 "final_report": "",
             }
         )
@@ -341,6 +357,114 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sections, ["Pricing", "Adoption"])
 
+    def test_prioritize_outline_sections_dedupes_overlapping_candidates(self):
+        sections = _prioritize_outline_sections(
+            ["AI Agent Market Size", "Market Size and Growth", "Pricing", "Policy"],
+            [
+                {
+                    "claim": "The market reached $7.2 billion in 2025.",
+                    "source_url": "https://example.com/market-a",
+                    "source_title": "Market A",
+                    "excerpt": "Market size reached $7.2 billion in 2025 with 38% annual growth.",
+                    "section_tag": "market_size",
+                    "authority_score": 8,
+                    "confidence": 0.9,
+                },
+                {
+                    "claim": "Growth remained above 30% year over year.",
+                    "source_url": "https://example.com/market-b",
+                    "source_title": "Market B",
+                    "excerpt": "Growth stayed above 30% year over year.",
+                    "section_tag": "market_size",
+                    "authority_score": 7,
+                    "confidence": 0.8,
+                },
+                {
+                    "claim": "Usage-based contracts dominate pricing.",
+                    "source_url": "https://example.com/pricing-a",
+                    "source_title": "Pricing A",
+                    "excerpt": "Usage-based contracts now dominate enterprise deals.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                    "confidence": 0.8,
+                },
+                {
+                    "claim": "Policy incentives accelerated adoption in 2025.",
+                    "source_url": "https://example.com/policy-a",
+                    "source_title": "Policy A",
+                    "excerpt": "Tax credits accelerated deployment in 2025.",
+                    "section_tag": "policy",
+                    "authority_score": 8,
+                    "confidence": 0.8,
+                },
+            ],
+            target_count=3,
+        )
+
+        self.assertEqual(sections, ["AI Agent Market Size", "Pricing", "Policy"])
+
+    def test_target_body_section_count_is_deep_by_default(self):
+        target = _target_body_section_count(
+            "What is the AI agents market size?",
+            ["Market Size", "Competition"],
+            [
+                {
+                    "claim": f"Claim {index}",
+                    "source_url": f"https://example.com/source-{index}",
+                    "source_title": f"Source {index}",
+                    "excerpt": "Evidence with 2025 data.",
+                    "section_tag": "market_size" if index % 2 == 0 else "competition",
+                }
+                for index in range(8)
+            ],
+        )
+
+        self.assertEqual(target, 6)
+
+    def test_target_body_section_count_allows_expansion_when_complex_and_well_supported(self):
+        evidence_cards = []
+        for index, tag in enumerate(
+            [
+                "market_size",
+                "competition",
+                "pricing",
+                "policy",
+                "adoption",
+                "regional_analysis",
+                "infrastructure",
+                "risks",
+                "investment",
+                "timeline",
+            ],
+            start=1,
+        ):
+            evidence_cards.append(
+                {
+                    "claim": f"Detailed claim {index} with 2025 metric {index * 10}.",
+                    "source_url": f"https://example.com/{tag}-{index}",
+                    "source_title": f"{tag} {index}",
+                    "excerpt": f"Detailed excerpt {index} with rankings, dates, and metrics.",
+                    "section_tag": tag,
+                }
+            )
+            evidence_cards.append(
+                {
+                    "claim": f"Supporting claim {index} with 2024 to 2026 trend.",
+                    "source_url": f"https://second.example/{tag}-{index}",
+                    "source_title": f"Secondary {tag} {index}",
+                    "excerpt": "Secondary evidence with quantitative support.",
+                    "section_tag": tag,
+                }
+            )
+
+        target = _target_body_section_count(
+            "Compare the global AI agents market in 2026 across size, adoption, pricing, policy, infrastructure, regional differences, risks, timelines, and leading vendors.",
+            ["Market Size", "Competition", "Pricing", "Policy", "Adoption", "Infrastructure"],
+            evidence_cards,
+        )
+
+        self.assertGreaterEqual(target, 7)
+
     def test_section_ready_for_draft_requires_multiple_sources_and_hard_detail(self):
         strong = _section_is_ready_for_draft(
             "Pricing",
@@ -388,6 +512,85 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(strong)
         self.assertFalse(weak)
 
+    def test_section_packets_select_priority_sections_for_second_pass_expansion(self):
+        section_packets = _build_section_packets(
+            ["Market Size", "Pricing", "Policy", "Background"],
+            "AI agents market size, pricing, and policy outlook in 2026",
+            [],
+            [
+                {
+                    "claim": "Market reached $7.2 billion in 2025.",
+                    "source_url": "https://example.com/market-a",
+                    "source_title": "Market A",
+                    "excerpt": "$7.2 billion market size in 2025.",
+                    "section_tag": "market_size",
+                    "authority_score": 8,
+                },
+                {
+                    "claim": "Growth stayed above 30% year over year.",
+                    "source_url": "https://second.example/market-b",
+                    "source_title": "Market B",
+                    "excerpt": "Growth stayed above 30% year over year.",
+                    "section_tag": "market_size",
+                    "authority_score": 8,
+                },
+                {
+                    "claim": "Analysts project another strong market expansion in 2026.",
+                    "source_url": "https://third.example/market-c",
+                    "source_title": "Market C",
+                    "excerpt": "Analysts project 2026 expansion with continued enterprise demand.",
+                    "section_tag": "market_size",
+                    "authority_score": 7,
+                },
+                {
+                    "claim": "Enterprise deals now use usage pricing.",
+                    "source_url": "https://example.com/pricing-a",
+                    "source_title": "Pricing A",
+                    "excerpt": "Usage pricing dominates enterprise contracts in 2025.",
+                    "section_tag": "pricing",
+                    "authority_score": 8,
+                },
+                {
+                    "claim": "Large deployments exceed $100,000 annual minimums.",
+                    "source_url": "https://second.example/pricing-b",
+                    "source_title": "Pricing B",
+                    "excerpt": "Large deployments exceed $100,000 annual minimums.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                },
+                {
+                    "claim": "Per-seat plans remain common for smaller teams.",
+                    "source_url": "https://third.example/pricing-c",
+                    "source_title": "Pricing C",
+                    "excerpt": "Per-seat plans remain common for teams under 50 users.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                },
+                {
+                    "claim": "Policy tax credits accelerate adoption in the US and EU.",
+                    "source_url": "https://example.com/policy-a",
+                    "source_title": "Policy A",
+                    "excerpt": "Policy credits accelerated adoption in 2025.",
+                    "section_tag": "policy",
+                    "authority_score": 9,
+                },
+                {
+                    "claim": "Background context is broad and non-quantitative.",
+                    "source_url": "https://example.com/background",
+                    "source_title": "Background",
+                    "excerpt": "Automation has a long history.",
+                    "section_tag": "background",
+                    "authority_score": 5,
+                },
+            ],
+        )
+
+        priority_sections = _select_priority_sections(section_packets)
+
+        self.assertIn("Market Size", priority_sections)
+        self.assertIn("Pricing", priority_sections)
+        self.assertNotIn("Background", priority_sections)
+
     async def test_quota_unavailable_jobs_wait_and_requeue_instead_of_failing(self):
         local_store = InMemoryCoordinationStore()
         await local_store.start()
@@ -429,6 +632,7 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                 "initial_state": {
                     "thread_id": thread_id,
                     "original_query": "query",
+                    "depth_profile": "deep",
                     "human_feedback": "",
                     "research_plan": [],
                     "required_sections": [],
@@ -443,8 +647,12 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                     "gaps": [],
                     "quality_summary": "",
                     "evaluation_rounds": 0,
+                    "targeted_gap_rounds": 0,
                     "outline_sections": [],
+                    "section_packets": [],
+                    "priority_sections": [],
                     "section_drafts": {},
+                    "report_reference_urls": [],
                     "final_report": "",
                 },
             },

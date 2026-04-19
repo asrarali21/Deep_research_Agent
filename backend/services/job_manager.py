@@ -72,6 +72,7 @@ class ResearchJobManager:
         initial_state = {
             "thread_id": thread_id,
             "original_query": query,
+            "depth_profile": "deep",
             "human_feedback": "",
             "research_plan": [],
             "required_sections": [],
@@ -86,8 +87,12 @@ class ResearchJobManager:
             "gaps": [],
             "quality_summary": "",
             "evaluation_rounds": 0,
+            "targeted_gap_rounds": 0,
             "outline_sections": [],
+            "section_packets": [],
+            "priority_sections": [],
             "section_drafts": {},
+            "report_reference_urls": [],
             "final_report": "",
         }
         record = {
