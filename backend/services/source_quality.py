@@ -198,9 +198,94 @@ def compute_authority_score(url: str, source_type: str | None = None) -> int:
     return 2
 
 
+# Important short tokens that should NOT be filtered out (domain-specific acronyms)
+IMPORTANT_SHORT_TOKENS = {
+    "ai", "ml", "ev", "agi", "nlp", "llm", "gpu", "cpu", "iot",
+    "api", "5g", "6g", "ar", "vr", "xr", "eu", "us", "uk",
+}
+
+
+def stem_token(token: str) -> str:
+    """Very lightweight suffix stripping for English.
+    
+    Not a full stemmer — just handles the most common inflections that cause
+    false negatives in token matching (e.g. 'predictions' → 'predict',
+    'timelines' → 'timeline', 'achieved' → 'achiev').
+    """
+    if len(token) <= 4:
+        return token
+    for suffix in ("ations", "ation", "ments", "ment", "ings", "ness", "tion", "sion",
+                   "ence", "ance", "able", "ible", "ical", "ally", "ious", "eous",
+                   "ives", "ful", "ous", "ing", "ies", "ers", "est", "ity",
+                   "ive", "ent", "ant", "ial", "ed", "ly", "es", "er", "al", "ty"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[: -len(suffix)]
+    if token.endswith("s") and len(token) > 4:
+        return token[:-1]
+    return token
+
+
 def query_tokens(query: str) -> list[str]:
+    """Extract meaningful tokens from a query string."""
     tokens = re.findall(r"[a-z0-9]+", query.lower())
-    return [token for token in tokens if len(token) > 2 and token not in STOPWORDS]
+    result = []
+    for token in tokens:
+        if token in STOPWORDS:
+            continue
+        if token in IMPORTANT_SHORT_TOKENS:
+            result.append(token)
+        elif len(token) > 2:
+            result.append(token)
+    return result
+
+
+def content_tokens(text: str) -> set[str]:
+    """Extract tokens from content text with stemming for fuzzy matching."""
+    raw = query_tokens(text)
+    stemmed = set()
+    for token in raw:
+        stemmed.add(token)
+        stemmed.add(stem_token(token))
+    return stemmed
+
+
+def fuzzy_token_overlap(query_toks: list[str] | set[str], text: str) -> int:
+    """Count how many query tokens appear in text via fuzzy matching.
+    
+    Uses multiple strategies to handle natural language inflections:
+    1. Exact token match (query token in text's content tokens)
+    2. Stemmed match (stem of query token in text's content tokens)
+    3. Substring containment (query token found as substring in full text)
+    4. Prefix matching (stems share a common prefix of 4+ chars)
+    
+    This handles 'predictions' matching 'predict', 'artificial' matching
+    'artificially', 'timeline' matching 'timelines', etc.
+    """
+    text_lower = text.lower()
+    text_token_set = content_tokens(text)
+    hits = 0
+    for token in query_toks:
+        stemmed = stem_token(token)
+        # Strategy 1 & 2: exact or stemmed token in text tokens
+        if token in text_token_set or stemmed in text_token_set:
+            hits += 1
+            continue
+        # Strategy 3: substring containment in full text
+        if token in text_lower or stemmed in text_lower:
+            hits += 1
+            continue
+        # Strategy 4: prefix matching between stems (handles predict/prediction/predictions)
+        # Check if any text token shares a common stem prefix of 4+ chars
+        min_prefix = min(len(stemmed), 4)
+        if len(stemmed) >= min_prefix:
+            stem_prefix = stemmed[:min_prefix]
+            if any(
+                text_tok.startswith(stem_prefix) or stemmed.startswith(text_tok[:min_prefix])
+                for text_tok in text_token_set
+                if len(text_tok) >= min_prefix
+            ):
+                hits += 1
+    return hits
 
 
 def is_writing_help_query(query: str) -> bool:
@@ -236,14 +321,40 @@ def is_generic_low_signal_result(query: str, title: str, snippet: str, url: str)
     return hit_count >= 2 and any(marker in text for marker in ("guide", "template", "examples", "writing"))
 
 
+def compute_query_relevance(query: str, title: str, snippet: str, url: str) -> float:
+    """Compute a 0.0-1.0 ratio of how many query tokens appear in the result.
+    
+    Uses fuzzy token matching (substring containment + basic stemming) to avoid
+    false negatives from inflection differences.
+    """
+    tokens = query_tokens(query)
+    if not tokens:
+        return 1.0  # No meaningful tokens to compare — pass through
+    text = f"{title} {snippet} {url}"
+    hits = fuzzy_token_overlap(tokens, text)
+    return hits / len(tokens)
+
+
+def is_off_topic_result(query: str, title: str, snippet: str, url: str) -> bool:
+    """Flag results where fewer than 15% of query tokens appear — likely off-topic."""
+    relevance = compute_query_relevance(query, title, snippet, url)
+    return relevance < 0.15
+
+
 def score_search_result(query: str, title: str, snippet: str, url: str) -> float:
     text = f"{title} {snippet} {url}".lower()
     tokens = query_tokens(query)
-    token_hits = sum(1 for token in tokens if token in text)
+    token_hits = fuzzy_token_overlap(tokens, text)
     source_type = infer_source_type(url)
     authority = compute_authority_score(url, source_type)
 
-    score = float(authority) * 2.2 + float(token_hits) * 1.7
+    # Content relevance dominates over domain authority
+    score = float(authority) * 1.2 + float(token_hits) * 3.5
+
+    # Zero-overlap penalty: results with no query token matches are almost certainly off-topic
+    if tokens and token_hits == 0:
+        score -= 20.0
+
     if looks_like_homepage(url):
         score -= 3.0
     if is_low_value_reference_url(url):
@@ -254,11 +365,6 @@ def score_search_result(query: str, title: str, snippet: str, url: str) -> float
         score -= 2.0
     if is_blocked_reference_url(url):
         score -= 100.0
-
-    if "india" in text or ".in" in get_hostname(url):
-        score += 1.0
-    if any(token in text for token in ("2026", "2025", "2024", "forecast", "projection", "policy", "pricing", "market")):
-        score += 0.7
 
     return score
 

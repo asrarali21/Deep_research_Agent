@@ -17,6 +17,7 @@ from services.model_router import RequestBudget
 from services.runtime import get_model_router, get_settings_instance
 from services.source_quality import (
     compute_authority_score,
+    fuzzy_token_overlap,
     infer_source_type,
     is_blocked_reference_url,
     is_generic_low_signal_result,
@@ -119,17 +120,39 @@ def _card_query_relevance_score(query: str, card: dict) -> int:
     if not query:
         return 0
     query_token_set = _section_tokens(query)
-    card_tokens = _section_tokens(
-        " ".join(
-            [
-                str(card.get("section_tag", "")),
-                str(card.get("claim", "")),
-                str(card.get("source_title", "")),
-                str(card.get("excerpt", ""))[:220],
-            ]
-        )
+    card_text = " ".join(
+        [
+            str(card.get("section_tag", "")),
+            str(card.get("claim", "")),
+            str(card.get("source_title", "")),
+            str(card.get("excerpt", ""))[:220],
+        ]
     )
-    return len(query_token_set & card_tokens)
+    overlap = fuzzy_token_overlap(query_token_set, card_text)
+    # Penalize cards with zero query overlap — likely off-topic
+    if query_token_set and overlap == 0:
+        return -5
+    return overlap
+
+
+def _is_card_relevant_to_query(query: str, card: dict, threshold: float = 0.10) -> bool:
+    """Check if an evidence card has minimum topical overlap with the query.
+    
+    Cards with <10% query token overlap are considered off-topic.
+    Uses fuzzy matching (stemming + substring containment) to avoid
+    false negatives from natural language inflections.
+    """
+    query_token_set = _section_tokens(query)
+    if not query_token_set:
+        return True
+    card_text = " ".join([
+        str(card.get("claim", "")),
+        str(card.get("excerpt", "")),
+        str(card.get("source_title", "")),
+        str(card.get("section_tag", "")),
+    ])
+    overlap = fuzzy_token_overlap(query_token_set, card_text)
+    return (overlap / len(query_token_set)) >= threshold
 
 
 def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str], query: str = "") -> list[dict]:
@@ -155,6 +178,15 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
         excerpt = str(card.get("excerpt", "")).strip()[:450]
         if is_generic_low_signal_result(query, source_title, excerpt, source_url):
             continue
+        # Query-relevance filter: drop evidence that is off-topic to the original query
+        cleaned_partial = {
+            "claim": claim,
+            "excerpt": excerpt,
+            "source_title": source_title,
+            "section_tag": normalize_section_tag(card.get("section_tag", "")),
+        }
+        if query and not _is_card_relevant_to_query(query, cleaned_partial):
+            continue
         cleaned = {
             **card,
             "source_url": source_url,
@@ -163,7 +195,7 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
             "source_title": source_title,
             "source_type": source_type,
             "authority_score": authority_score,
-            "section_tag": normalize_section_tag(card.get("section_tag", "")),
+            "section_tag": cleaned_partial["section_tag"],
         }
         key = (cleaned["section_tag"], source_url, cleaned["claim"].lower())
         if key in seen:
@@ -986,6 +1018,35 @@ async def build_outline_node(state: OrchestratorState):
                 "priority_sections": priority_sections,
             }
 
+        # --- Graceful degradation: use whatever supported sections we have ---
+        # Instead of giving up entirely, draft the sections we can support.
+        # Only truly fail when we have 0-1 draftable sections.
+        _MIN_SECTIONS_FOR_PARTIAL_REPORT = 2
+
+        if len(supported_packets) >= _MIN_SECTIONS_FOR_PARTIAL_REPORT:
+            # We have enough for a partial but useful report
+            supported_sections = [packet["section"] for packet in supported_packets][:target_section_count]
+            supported_packets_filtered = [packet for packet in section_packets if packet["section"] in supported_sections]
+            priority_sections_filtered = [section for section in priority_sections if section in supported_sections]
+            quality_summary = " | ".join(
+                part
+                for part in (
+                    quality_summary.strip(),
+                    f"supported_sections={len(supported_packets)}/{settings.min_body_sections_default}",
+                    "status=partial_report_with_available_evidence",
+                )
+                if part
+            )
+            return {
+                "gaps": [],
+                "pending_tasks": [],
+                "quality_summary": quality_summary,
+                "outline_sections": supported_sections,
+                "section_packets": supported_packets_filtered,
+                "priority_sections": priority_sections_filtered,
+            }
+
+        # Truly insufficient — fewer than 2 draftable sections
         quality_summary = " | ".join(
             part
             for part in (
@@ -1264,6 +1325,19 @@ async def final_edit_node(state: OrchestratorState):
     final_report = f"# {report_title}\n\n"
     final_report += f"## Executive Summary\n\n{exec_summary}\n\n"
     final_report += f"{draft_text_formatted}\n\n"
+
+    # Add Research Limitations note for partial reports
+    quality_summary = state.get("quality_summary", "")
+    if "partial_report" in quality_summary:
+        section_count = len(section_drafts)
+        final_report += (
+            "## Research Limitations\n\n"
+            f"This report covers {section_count} validated section{'s' if section_count != 1 else ''} "
+            "based on the evidence that met quality and relevance thresholds. "
+            "Some planned sections could not be drafted due to insufficient authoritative evidence. "
+            "Additional targeted research may strengthen the analysis in under-covered areas.\n\n"
+        )
+
     final_report += f"## Conclusion & Future Outlook\n\n{conclusion}\n\n"
     final_report += f"{reference_section}"
 

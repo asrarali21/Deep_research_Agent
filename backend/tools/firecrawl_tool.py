@@ -23,6 +23,7 @@ from services.source_quality import (
     compute_authority_score,
     infer_source_type,
     is_generic_low_signal_result,
+    is_off_topic_result,
     is_reference_usable,
     looks_like_homepage,
     normalize_url,
@@ -32,7 +33,7 @@ from services.source_quality import (
 load_dotenv()
 
 _app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY")) if FirecrawlApp and os.getenv("FIRECRAWL_API_KEY") else None
-_ddg_search = DuckDuckGoSearchResults(output_format="list", num_results=8) if DuckDuckGoSearchResults else None
+_ddg_search = DuckDuckGoSearchResults(output_format="list", num_results=12) if DuckDuckGoSearchResults else None
 _cache: dict[str, tuple[float, object]] = {}
 
 
@@ -54,6 +55,10 @@ def _cache_set(key: str, value, ttl_seconds: int) -> None:
     _cache[key] = (time.time() + ttl_seconds, value)
 
 
+# Minimum relevance score — results below this are dropped from the pipeline
+_MIN_RELEVANCE_SCORE = 3.0
+
+
 def _coerce_search_result(title: str, url: str, snippet: str, query: str) -> dict | None:
     if not url or not is_reference_usable(url):
         return None
@@ -62,9 +67,18 @@ def _coerce_search_result(title: str, url: str, snippet: str, query: str) -> dic
     if is_generic_low_signal_result(query, title, snippet, normalized):
         return None
 
+    # Off-topic gate: reject results with <15% query token overlap
+    if is_off_topic_result(query, title, snippet, normalized):
+        return None
+
     source_type = infer_source_type(normalized)
     authority_score = compute_authority_score(normalized, source_type)
     relevance_score = score_search_result(query, title, snippet, normalized)
+
+    # Drop results with very low relevance scores
+    if relevance_score < _MIN_RELEVANCE_SCORE:
+        return None
+
     return {
         "title": title or "No title",
         "url": normalized,

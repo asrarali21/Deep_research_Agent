@@ -4,6 +4,7 @@ Sub-Agent — a bounded research worker that uses ModelRouter for tool-calling.
 
 import asyncio
 import json
+import logging
 from typing import Annotated, TypedDict
 from urllib.parse import urlsplit
 
@@ -24,6 +25,15 @@ from services.source_quality import (
     is_reference_usable,
     looks_like_homepage,
 )
+
+logger = logging.getLogger("sub_agent")
+
+# Debug file logger for tracing evidence pipeline
+_debug_handler = logging.FileHandler("/tmp/deep_research_debug.log")
+_debug_handler.setLevel(logging.DEBUG)
+_debug_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+logger.addHandler(_debug_handler)
+logger.setLevel(logging.DEBUG)
 from tools.firecrawl_tool import scrape, search
 
 load_dotenv()
@@ -67,6 +77,12 @@ EFFICIENCY (critical — API budget is limited):
 - Be decisive: 1-2 searches + 2-3 scrapes + submit = done. Do NOT over-research.
 - If you already have 3+ solid evidence cards with specific facts, numbers, or quotes — SUBMIT immediately.
 - Never run more than 3 search queries total. Refine your query instead of repeating.
+
+RELEVANCE (critical — off-topic evidence is rejected):
+- Every evidence card MUST directly answer the research task. Do NOT submit general industry reports, unrelated market data, or tangential commercial content.
+- If search results are irrelevant to the task, REFINE your search query to be more specific. Do not scrape irrelevant pages.
+- Before submitting, mentally verify: "Does this evidence directly help answer the research task?" If not, discard it.
+- Off-topic evidence cards will be automatically filtered out and won't count toward the minimum requirements.
 
 QUALITY:
 - Prefer authoritative sources: government sites, journals, official reports, industry databases.
@@ -286,6 +302,33 @@ def _empty_submission_result(state: SubAgentState, status: str) -> dict:
     }
 
 
+def _task_tokens(task: str) -> set[str]:
+    """Extract meaningful tokens from a task description for relevance matching."""
+    from services.source_quality import query_tokens
+    return set(query_tokens(task))
+
+
+def _is_evidence_relevant_to_task(task: str, card: dict, threshold: float = 0.15) -> bool:
+    """Check if an evidence card is topically relevant to the research task.
+    
+    Returns True if at least `threshold` fraction of the task's tokens appear
+    in the card's claim + excerpt + title via fuzzy matching (stemming + substring).
+    This catches obviously off-topic evidence like spa market reports showing up
+    in an AGI research task, while allowing for natural language inflections.
+    """
+    from services.source_quality import query_tokens, fuzzy_token_overlap
+    task_token_set = set(query_tokens(task))
+    if not task_token_set:
+        return True  # No meaningful tokens in task, skip filter
+    card_text = " ".join([
+        str(card.get("claim", "")),
+        str(card.get("excerpt", "")),
+        str(card.get("source_title", "")),
+    ])
+    hits = fuzzy_token_overlap(task_token_set, card_text)
+    return (hits / len(task_token_set)) >= threshold
+
+
 def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindings) -> tuple[list[str], list[dict], list[dict], list[str]]:
     settings = get_settings()
     scraped_sources = _dedupe_strings(list(state.get("sources", [])))
@@ -294,6 +337,16 @@ def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindin
         scraped_sources,
     )
     valid_findings = _validated_findings(submitted.findings, scraped_sources)
+
+    # --- Relevance filter: drop evidence cards that are off-topic to the task ---
+    task_text = state.get("task", "")
+    total_before_relevance = len(valid_evidence_cards)
+    valid_evidence_cards = [
+        card for card in valid_evidence_cards
+        if _is_evidence_relevant_to_task(task_text, card)
+    ]
+    off_topic_count = total_before_relevance - len(valid_evidence_cards)
+
     authoritative_sources = {
         card["source_url"]
         for card in valid_evidence_cards
@@ -305,6 +358,15 @@ def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindin
     )
 
     issues: list[str] = []
+
+    # Relevance quality gate
+    if total_before_relevance > 0 and off_topic_count > total_before_relevance * 0.5:
+        issues.append(
+            f"{off_topic_count} of {total_before_relevance} evidence cards were off-topic and filtered out. "
+            "Refine your search queries to be more specific to the research task. "
+            "Do not submit evidence from unrelated industries or topics."
+        )
+
     if len(scraped_sources) < settings.min_scraped_sources_per_task:
         issues.append(f"Need at least {settings.min_scraped_sources_per_task} scraped sources before finalizing.")
     if len(valid_evidence_cards) < settings.min_evidence_cards_per_task:
@@ -328,6 +390,11 @@ async def reason_node(state: SubAgentState) -> dict:
     settings = _settings()
     router = get_model_router()
 
+    logger.debug(
+        "reason_node: task=%s, iterations=%d, sources=%d, evidence_cards=%d",
+        state["task"][:80], state.get("iterations", 0),
+        len(state.get("sources", [])), len(state.get("evidence_cards", [])),
+    )
     recent_messages = state["messages"][-settings.recent_message_count :]
     messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=f"Research task:\n{state['task']}")]
     messages.append(
@@ -360,6 +427,9 @@ async def reason_node(state: SubAgentState) -> dict:
         trace_id=state["trace_id"],
     )
 
+    tool_names = [tc["name"] for tc in getattr(response, "tool_calls", []) or []]
+    logger.debug("reason_node: LLM responded with tool_calls=%s", tool_names)
+
     return {
         "messages": [response],
         "iterations": state.get("iterations", 0) + 1,
@@ -373,6 +443,8 @@ def act_node(state: SubAgentState) -> dict:
     discovered_sources = list(state.get("discovered_sources", []))
     seen_source_urls = list(state.get("seen_source_urls", []))
     working_summary = state.get("working_summary", "")
+
+    logger.debug("act_node: processing %d tool_calls", len(getattr(last_message, "tool_calls", []) or []))
 
     for tool_call in last_message.tool_calls:
         tool_name = tool_call["name"]
@@ -398,6 +470,10 @@ def act_node(state: SubAgentState) -> dict:
             try:
                 submitted = SubmitFinalFindings(**tool_args)
                 issues, valid_findings, valid_evidence_cards, coverage_tags = assess_submission_quality(state, submitted)
+                logger.debug(
+                    "act_node: SubmitFinalFindings — raw_cards=%d, valid_cards=%d, valid_findings=%d, issues=%s",
+                    len(submitted.evidence_cards), len(valid_evidence_cards), len(valid_findings), issues,
+                )
                 if issues and state.get("iterations", 0) < get_settings().max_sub_agent_iterations:
                     result = {
                         "accepted": False,
@@ -454,42 +530,67 @@ def act_node(state: SubAgentState) -> dict:
 
 
 def finalize_node(state: SubAgentState) -> dict:
-    last_message = state["messages"][-1]
     status = "done"
     if state.get("iterations", 0) >= get_settings().max_sub_agent_iterations:
         status = "max_iterations"
 
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        for tool_call in last_message.tool_calls:
-            if tool_call["name"] == "SubmitFinalFindings":
-                try:
-                    validated = SubmitFinalFindings(**tool_call["args"])
-                    issues, valid_findings, valid_evidence_cards, coverage_tags = assess_submission_quality(state, validated)
-                    if issues and status != "max_iterations":
-                        break
-                    tool_message = ToolMessage(content="Findings submitted gracefully.", tool_call_id=tool_call["id"])
-                    scraped_sources = _dedupe_strings(
-                        list(state.get("sources", []))
-                        + [card["source_url"] for card in valid_evidence_cards if card.get("source_url")]
-                        + [finding["source_url"] for finding in valid_findings if finding.get("source_url")]
-                    )
-                    discovered_sources = _dedupe_strings(
-                        list(state.get("discovered_sources", []))
-                        + scraped_sources
-                    )
-                    return {
-                        "messages": [tool_message],
-                        "findings": valid_findings,
-                        "evidence_cards": valid_evidence_cards,
-                        "coverage_tags": coverage_tags,
-                        "sources": scraped_sources,
-                        "discovered_sources": discovered_sources,
-                        "completed_tasks": [state["task"]],
-                        "status": status,
-                    }
-                except ValidationError:
-                    break
+    logger.debug(
+        "finalize_node: status=%s, iterations=%d, total_messages=%d, sources=%d",
+        status, state.get("iterations", 0), len(state["messages"]), len(state.get("sources", [])),
+    )
 
+    # Count messages with tool_calls
+    messages_with_submit = 0
+    for msg in state["messages"]:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc["name"] == "SubmitFinalFindings":
+                    messages_with_submit += 1
+    logger.debug("finalize_node: found %d SubmitFinalFindings calls in message history", messages_with_submit)
+
+    # Scan ALL messages for the most recent SubmitFinalFindings call.
+    # The last message may be a ToolMessage (from act_node), not the AIMessage
+    # that contained the tool_calls. We need to walk backwards to find it.
+    for message in reversed(state["messages"]):
+        if not hasattr(message, "tool_calls") or not message.tool_calls:
+            continue
+        for tool_call in message.tool_calls:
+            if tool_call["name"] != "SubmitFinalFindings":
+                continue
+            try:
+                validated = SubmitFinalFindings(**tool_call["args"])
+                issues, valid_findings, valid_evidence_cards, coverage_tags = assess_submission_quality(state, validated)
+                if issues and status != "max_iterations":
+                    # Still has issues and not at max iterations — keep trying
+                    continue
+                tool_message = ToolMessage(content="Findings submitted gracefully.", tool_call_id=tool_call["id"])
+                scraped_sources = _dedupe_strings(
+                    list(state.get("sources", []))
+                    + [card["source_url"] for card in valid_evidence_cards if card.get("source_url")]
+                    + [finding["source_url"] for finding in valid_findings if finding.get("source_url")]
+                )
+                discovered_sources = _dedupe_strings(
+                    list(state.get("discovered_sources", []))
+                    + scraped_sources
+                )
+                return {
+                    "messages": [tool_message],
+                    "findings": valid_findings,
+                    "evidence_cards": valid_evidence_cards,
+                    "coverage_tags": coverage_tags,
+                    "sources": scraped_sources,
+                    "discovered_sources": discovered_sources,
+                    "completed_tasks": [state["task"]],
+                    "status": status,
+                }
+            except ValidationError as e:
+                logger.debug("finalize_node: ValidationError for SubmitFinalFindings: %s", e)
+                continue
+
+    logger.warning(
+        "finalize_node: NO valid SubmitFinalFindings found! Returning empty. status=%s, task=%s",
+        status, state["task"][:80],
+    )
     if status == "done":
         status = "insufficient_evidence"
     return _empty_submission_result(state, status)
