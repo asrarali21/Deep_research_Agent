@@ -69,13 +69,17 @@ class SubAgentState(TypedDict):
 
 SYSTEM_PROMPT = """You are a quality-first research agent. Your job is to build a strong evidence pack for one specific research task.
 
-WORKFLOW:
-- Start with SearchTool (1-2 focused searches), then ScrapeTool on the 2-3 most promising results.
-- After scraping, extract key facts and call SubmitFinalFindings.
+WORKFLOW (follow this order strictly):
+1. SEARCH: Use SearchTool with 1-2 focused queries to find relevant sources.
+2. SCRAPE: Use ScrapeTool on the 2-4 best results to extract content.
+3. SUBMIT: After scraping, call SubmitFinalFindings with evidence_cards extracted from scraped content.
+
+CRITICAL RULE: Do NOT call SubmitFinalFindings before you have scraped at least 2 pages.
+Each evidence card's source_url MUST match a URL you have already scraped. Cards referencing unscraped URLs are rejected.
 
 EFFICIENCY (critical — API budget is limited):
-- Be decisive: 1-2 searches + 2-3 scrapes + submit = done. Do NOT over-research.
-- If you already have 3+ solid evidence cards with specific facts, numbers, or quotes — SUBMIT immediately.
+- Be decisive: 1-2 searches + 2-4 scrapes + submit = done. Do NOT over-research.
+- If you already have 2+ solid evidence cards with specific facts, numbers, or quotes — SUBMIT immediately.
 - Never run more than 3 search queries total. Refine your query instead of repeating.
 
 RELEVANCE (critical — off-topic evidence is rejected):
@@ -597,7 +601,10 @@ def finalize_node(state: SubAgentState) -> dict:
 
 
 def should_continue(state: SubAgentState) -> str:
-    if state.get("iterations", 0) >= get_settings().max_sub_agent_iterations:
+    settings = get_settings()
+    iterations = state.get("iterations", 0)
+    
+    if iterations >= settings.max_sub_agent_iterations:
         return "finalize"
 
     last_message = state["messages"][-1]
@@ -606,10 +613,19 @@ def should_continue(state: SubAgentState) -> str:
             if tool_call["name"] == "SubmitFinalFindings":
                 try:
                     submitted = SubmitFinalFindings(**tool_call["args"])
-                    issues, _, _, _ = assess_submission_quality(state, submitted)
-                    if issues:
-                        return "act"
-                    return "finalize"
+                    issues, _, valid_evidence_cards, _ = assess_submission_quality(state, submitted)
+                    if not issues:
+                        return "finalize"
+                    # Near max iterations: accept partial evidence rather than
+                    # wasting the last iteration on a rejection+retry cycle that
+                    # will just hit max_iterations and return empty.
+                    if iterations >= settings.max_sub_agent_iterations - 2 and valid_evidence_cards:
+                        logger.debug(
+                            "should_continue: accepting partial evidence (%d cards) near max_iterations (%d/%d)",
+                            len(valid_evidence_cards), iterations, settings.max_sub_agent_iterations,
+                        )
+                        return "finalize"
+                    return "act"
                 except ValidationError:
                     return "act"
         return "act"
