@@ -156,15 +156,23 @@ def _is_card_relevant_to_query(query: str, card: dict, threshold: float = 0.10) 
 
 
 def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str], query: str = "") -> list[dict]:
+    from services.source_quality import match_scraped_source
+
     allowed_sources = set(source for source in scraped_sources if is_reference_usable(source))
     curated: list[dict] = []
     seen = set()
+    query_token_set = _section_tokens(query) if query else set()
     for card in evidence_cards:
         source_url = str(card.get("source_url", "")).strip()
         claim = str(card.get("claim", "")).strip()
         if not source_url or not claim:
             continue
-        if source_url not in allowed_sources:
+        matched, representative = match_scraped_source(source_url, list(allowed_sources))
+        verification_status = "verified" if matched else "unverified"
+        if matched and representative:
+            source_url = representative
+        elif source_url not in allowed_sources and not is_reference_usable(source_url):
+            # Keep behavior conservative for clearly unusable references.
             continue
         if is_blocked_reference_url(source_url):
             continue
@@ -178,15 +186,16 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
         excerpt = str(card.get("excerpt", "")).strip()[:450]
         if is_generic_low_signal_result(query, source_title, excerpt, source_url):
             continue
-        # Query-relevance filter: drop evidence that is off-topic to the original query
+        # Query relevance: score + demote rather than drop (avoid false positives)
+        overlap = fuzzy_token_overlap(query_token_set, f"{claim} {excerpt} {source_title}") if query_token_set else 0
+        query_relevance = (overlap / len(query_token_set)) if query_token_set else 1.0
         cleaned_partial = {
             "claim": claim,
             "excerpt": excerpt,
             "source_title": source_title,
             "section_tag": normalize_section_tag(card.get("section_tag", "")),
+            "query_relevance": round(float(query_relevance), 3),
         }
-        if query and not _is_card_relevant_to_query(query, cleaned_partial):
-            continue
         cleaned = {
             **card,
             "source_url": source_url,
@@ -196,6 +205,8 @@ def _curate_evidence_cards(evidence_cards: list[dict], scraped_sources: list[str
             "source_type": source_type,
             "authority_score": authority_score,
             "section_tag": cleaned_partial["section_tag"],
+            "verification_status": str(card.get("verification_status") or verification_status),
+            "query_relevance": cleaned_partial["query_relevance"],
         }
         key = (cleaned["section_tag"], source_url, cleaned["claim"].lower())
         if key in seen:
@@ -236,17 +247,28 @@ def _build_references_section(evidence_cards: list[dict], reference_urls: list[s
             if url in unique_cards_by_url
         ][:limit]
     else:
-        unique_cards = list(unique_cards_by_url.values())[:limit]
+        # Prefer verified references first; fall back to unverified if needed.
+        verified: list[dict] = []
+        unverified: list[dict] = []
+        for card in unique_cards_by_url.values():
+            status = str(card.get("verification_status", "")).lower()
+            if status == "verified":
+                verified.append(card)
+            else:
+                unverified.append(card)
+        unique_cards = (verified + unverified)[:limit]
 
     if not unique_cards:
-        return "## References\n\n1. No validated references were available."
+        return "## References\n\n1. No references were available."
 
     lines = ["## References", ""]
     for index, card in enumerate(unique_cards, start=1):
         title = card.get("source_title", "Untitled source").strip() or "Untitled source"
         url = card.get("source_url", "")
         source_type = card.get("source_type", "unknown")
-        lines.append(f"{index}. [{title}]({url}) ({source_type})")
+        status = str(card.get("verification_status", "")).lower()
+        status_note = "" if status == "verified" else "; unverified"
+        lines.append(f"{index}. [{title}]({url}) ({source_type}{status_note})")
     return "\n".join(lines)
 
 
@@ -509,16 +531,41 @@ def _section_is_ready_for_draft(section: str, evidence_cards: list[dict]) -> boo
     settings = get_settings()
     snapshot = _section_support_snapshot(section, evidence_cards)
     min_sources = max(settings.min_sources_per_section, settings.min_distinct_sources_per_draftable_section)
-    if snapshot["card_count"] < settings.min_evidence_cards_per_draftable_section:
+
+    # Graceful degradation under low evidence density:
+    # If the whole job has far fewer cards than the deep-mode target, allow a section
+    # to become draftable with 1 strong card / 1 source so we can generate a partial report.
+    low_evidence_mode = len(evidence_cards) < max(
+        settings.min_evidence_cards_for_report,
+        settings.min_body_sections_default * settings.min_evidence_cards_per_draftable_section,
+    )
+    required_cards = settings.min_evidence_cards_per_draftable_section
+    required_sources = min_sources
+    if low_evidence_mode:
+        required_cards = min(required_cards, 1)
+        required_sources = min(required_sources, 1)
+
+    if snapshot["card_count"] < required_cards:
         return False
-    if snapshot["distinct_sources"] < min_sources:
+    if snapshot["distinct_sources"] < required_sources:
         return False
     if _section_requires_quantitative_support(section):
+        if low_evidence_mode:
+            # With very limited evidence, accept 1 card if it has any number/date signal OR strong authority.
+            return snapshot["quantitative_cards"] >= 1 or snapshot["top_authority"] >= 8
         return snapshot["quantitative_cards"] >= settings.min_quant_signals_for_numeric_sections
-    return (
-        snapshot["quantitative_cards"] >= 1
-        or snapshot["top_authority"] >= 8
-    )
+
+    if snapshot["quantitative_cards"] >= 1 or snapshot["top_authority"] >= 8:
+        return True
+
+    if low_evidence_mode:
+        # As a last resort, accept a verified card even if it doesn't contain numbers.
+        return any(
+            str(card.get("verification_status", "")).lower() == "verified"
+            for card in snapshot.get("selected_cards", [])
+        )
+
+    return False
 
 
 def _is_front_or_back_matter_section(section: str) -> bool:

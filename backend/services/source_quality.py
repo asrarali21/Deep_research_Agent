@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 AUTHORITATIVE_DOMAINS = (
@@ -128,6 +128,75 @@ def normalize_url(url: str) -> str:
     split = urlsplit(url.strip())
     path = split.path.rstrip("/") or "/"
     return split._replace(scheme=split.scheme.lower(), netloc=split.netloc.lower(), path=path, fragment="").geturl()
+
+
+_TRACKING_QUERY_PREFIXES = (
+    "utm_",
+    "gclid",
+    "fbclid",
+    "yclid",
+    "mc_cid",
+    "mc_eid",
+    "mkt_tok",
+    "ref",
+    "ref_",
+)
+
+
+def normalize_url_for_matching(url: str) -> str:
+    """Normalize URLs for equivalence checks (more aggressive than `normalize_url`).
+
+    - Lower-case scheme/host
+    - Remove fragment
+    - Remove trailing slash (except root)
+    - Drop common tracking query params (utm_*, gclid, fbclid, etc.)
+    - Sort remaining query params for stable comparison
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+
+    split = urlsplit(raw)
+    scheme = (split.scheme or "https").lower()
+    netloc = split.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    path = split.path.rstrip("/") or "/"
+
+    kept: list[tuple[str, str]] = []
+    for key, value in parse_qsl(split.query, keep_blank_values=True):
+        k = (key or "").strip()
+        if not k:
+            continue
+        lowered = k.lower()
+        if lowered.startswith("utm_"):
+            continue
+        if any(lowered == prefix or lowered.startswith(prefix) for prefix in _TRACKING_QUERY_PREFIXES):
+            continue
+        kept.append((k, value))
+    kept.sort(key=lambda kv: (kv[0].lower(), kv[1]))
+    query = urlencode(kept, doseq=True)
+
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def match_scraped_source(card_url: str, scraped_urls: list[str]) -> tuple[bool, str]:
+    """Return (matched, best_url) where best_url is a representative scraped URL.
+
+    Matching is done on `normalize_url_for_matching()`; when matched, we return
+    the first scraped URL with the same normalized key (stable representative).
+    """
+    target = normalize_url_for_matching(card_url)
+    if not target:
+        return False, ""
+    normalized_to_original: dict[str, str] = {}
+    for src in scraped_urls:
+        key = normalize_url_for_matching(src)
+        if key and key not in normalized_to_original:
+            normalized_to_original[key] = src
+    best = normalized_to_original.get(target, "")
+    return (bool(best), best)
 
 
 def get_hostname(url: str) -> str:

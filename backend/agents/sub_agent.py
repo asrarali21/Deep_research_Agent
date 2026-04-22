@@ -245,6 +245,8 @@ def _merge_working_summary(existing: str, tool_name: str, result) -> str:
 
 
 def _validated_evidence_cards(raw_cards: list[dict], scraped_sources: list[str]) -> list[dict]:
+    from services.source_quality import match_scraped_source
+
     allowed_sources = set(scraped_sources)
     valid_cards: list[dict] = []
     seen = set()
@@ -254,8 +256,15 @@ def _validated_evidence_cards(raw_cards: list[dict], scraped_sources: list[str])
         excerpt = str(card.get("excerpt", "")).strip()
         if not source_url or not claim or not excerpt:
             continue
-        if source_url not in allowed_sources:
-            continue
+
+        matched, representative = match_scraped_source(source_url, scraped_sources)
+        verification_status = "verified" if matched else "unverified"
+        if matched and representative:
+            source_url = representative
+
+        # Keep strict safety checks for both verified + unverified evidence.
+        # Unverified evidence may exist due to canonicalization/redirect differences or
+        # model mistakes; we keep it but label it for downstream gates.
         if not is_reference_usable(source_url) or is_blocked_reference_url(source_url):
             continue
         source_type = card.get("source_type") or infer_source_type(source_url)
@@ -269,6 +278,7 @@ def _validated_evidence_cards(raw_cards: list[dict], scraped_sources: list[str])
             "source_type": source_type,
             "authority_score": authority_score,
             "source_title": str(card.get("source_title", "")).strip() or urlsplit(source_url).netloc,
+            "verification_status": str(card.get("verification_status") or verification_status),
         }
         key = (cleaned["section_tag"], source_url, cleaned["claim"].lower())
         if key in seen:
@@ -342,14 +352,56 @@ def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindin
     )
     valid_findings = _validated_findings(submitted.findings, scraped_sources)
 
-    # --- Relevance filter: drop evidence cards that are off-topic to the task ---
+    # --- Relevance scoring: keep most cards; only drop extreme junk ---
     task_text = state.get("task", "")
+    from services.source_quality import query_tokens, fuzzy_token_overlap
+
+    task_token_set = set(query_tokens(task_text))
     total_before_relevance = len(valid_evidence_cards)
-    valid_evidence_cards = [
-        card for card in valid_evidence_cards
-        if _is_evidence_relevant_to_task(task_text, card)
-    ]
+    off_topic_suspected = 0
+    retained: list[dict] = []
+    for card in valid_evidence_cards:
+        ratio = 1.0
+        hits = 0
+        if task_token_set:
+            card_text = " ".join(
+                [
+                    str(card.get("claim", "")),
+                    str(card.get("excerpt", "")),
+                    str(card.get("source_title", "")),
+                ]
+            )
+            hits = fuzzy_token_overlap(task_token_set, card_text)
+            ratio = hits / max(1, len(task_token_set))
+        card["task_relevance"] = round(float(ratio), 3)
+        if ratio < 0.10:
+            off_topic_suspected += 1
+            card["off_topic_suspected"] = True
+
+        # Hard-drop only the worst evidence: zero overlap + low authority + unverified.
+        try:
+            authority = int(card.get("authority_score", 0))
+        except (TypeError, ValueError):
+            authority = 0
+        if task_token_set and hits == 0 and authority < 7 and str(card.get("verification_status", "")).lower() != "verified":
+            continue
+
+        retained.append(card)
+    valid_evidence_cards = retained
     off_topic_count = total_before_relevance - len(valid_evidence_cards)
+    verified_count = sum(1 for card in valid_evidence_cards if str(card.get("verification_status", "")).lower() == "verified")
+    unverified_count = len(valid_evidence_cards) - verified_count
+    if total_before_relevance:
+        logger.debug(
+            "assess_submission_quality: task=%s, raw_validated=%d, kept=%d, dropped=%d, verified=%d, unverified=%d, off_topic_suspected=%d",
+            str(task_text)[:80],
+            total_before_relevance,
+            len(valid_evidence_cards),
+            off_topic_count,
+            verified_count,
+            unverified_count,
+            off_topic_suspected,
+        )
 
     authoritative_sources = {
         card["source_url"]
@@ -364,18 +416,30 @@ def assess_submission_quality(state: SubAgentState, submitted: SubmitFinalFindin
     issues: list[str] = []
 
     # Relevance quality gate
-    if total_before_relevance > 0 and off_topic_count > total_before_relevance * 0.5:
+    if total_before_relevance > 0 and off_topic_suspected > total_before_relevance * 0.6:
         issues.append(
-            f"{off_topic_count} of {total_before_relevance} evidence cards were off-topic and filtered out. "
+            f"{off_topic_suspected} of {total_before_relevance} evidence cards looked off-topic to the task. "
             "Refine your search queries to be more specific to the research task. "
             "Do not submit evidence from unrelated industries or topics."
         )
 
     if len(scraped_sources) < settings.min_scraped_sources_per_task:
         issues.append(f"Need at least {settings.min_scraped_sources_per_task} scraped sources before finalizing.")
-    if len(valid_evidence_cards) < settings.min_evidence_cards_per_task:
+
+    # Dynamic evidence minimum:
+    # - Baseline stays at settings.min_evidence_cards_per_task (default 2)
+    # - Narrow tasks can finalize with 1 card
+    # - Near max-iterations, accept partial evidence to avoid deadlock
+    effective_min_cards = int(settings.min_evidence_cards_per_task)
+    if len(task_token_set) <= 6:
+        effective_min_cards = min(effective_min_cards, 1)
+    iterations = int(state.get("iterations", 0))
+    if iterations >= settings.max_sub_agent_iterations - 2:
+        effective_min_cards = min(effective_min_cards, 1)
+
+    if len(valid_evidence_cards) < effective_min_cards:
         issues.append(
-            f"Need at least {settings.min_evidence_cards_per_task} evidence cards backed by scraped sources before finalizing."
+            f"Need at least {effective_min_cards} evidence cards before finalizing."
         )
     if len(authoritative_sources) < settings.min_authoritative_sources_per_task:
         issues.append(

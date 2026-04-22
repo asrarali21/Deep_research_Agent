@@ -122,3 +122,52 @@ class SubAgentLogicTests(unittest.TestCase):
         self.assertEqual(result["sources"], ["https://example.com/source-a"])
         self.assertEqual(result["completed_tasks"], ["task"])
         self.assertEqual(result["status"], "insufficient_evidence")
+
+    def test_assess_submission_quality_accepts_canonical_url_variants_as_verified(self):
+        state = {
+            "trace_id": "trace-1",
+            "task": "simple task about example",
+            "messages": [],
+            "working_summary": "",
+            "findings": [],
+            "evidence_cards": [],
+            "sources": ["https://example.com/source-a"],
+            "discovered_sources": ["https://example.com/source-a"],
+            "seen_source_urls": ["https://example.com/source-a"],
+            "coverage_tags": [],
+            "completed_tasks": [],
+            "iterations": 1,
+            "status": "running",
+        }
+        submitted = sub_agent.SubmitFinalFindings(
+            findings=[
+                sub_agent.Finding(
+                    fact="Fact",
+                    source_url="https://example.com/source-a",
+                    confidence=0.9,
+                )
+            ],
+            evidence_cards=[
+                sub_agent.EvidenceCard(
+                    claim="Claim",
+                    source_url="https://example.com/source-a?utm_source=newsletter&utm_medium=email",
+                    source_title="Example",
+                    excerpt="Excerpt text",
+                    section_tag="general",
+                    source_type="guideline",
+                    authority_score=9,
+                    confidence=0.9,
+                )
+            ],
+            coverage_tags=["general"],
+            summary="Summary",
+        )
+
+        issues, valid_findings, valid_cards, _ = sub_agent.assess_submission_quality(state, submitted)
+
+        # Should not lose the evidence card due to URL mismatch and should rewrite to scraped URL.
+        self.assertEqual(valid_findings[0]["source_url"], "https://example.com/source-a")
+        self.assertEqual(len(valid_cards), 1)
+        self.assertEqual(valid_cards[0]["source_url"], "https://example.com/source-a")
+        self.assertEqual(valid_cards[0].get("verification_status"), "verified")
+        self.assertIsInstance(issues, list)

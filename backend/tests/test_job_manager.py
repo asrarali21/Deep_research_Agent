@@ -293,6 +293,49 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pricing Update", references)
         self.assertNotIn("How to Write Introductions for Research Papers", references)
 
+    def test_references_section_prefers_verified_and_labels_unverified(self):
+        references = _build_references_section(
+            [
+                {
+                    "claim": "Unverified claim",
+                    "source_url": "https://unverified.example/b",
+                    "source_title": "Unverified",
+                    "excerpt": "y",
+                    "source_type": "news",
+                    "verification_status": "unverified",
+                },
+                {
+                    "claim": "Verified claim",
+                    "source_url": "https://verified.example/a",
+                    "source_title": "Verified",
+                    "excerpt": "x",
+                    "source_type": "guideline",
+                    "verification_status": "verified",
+                },
+            ],
+            reference_urls=None,
+            limit=10,
+        )
+        self.assertIn("[Verified](https://verified.example/a)", references)
+        self.assertIn("unverified", references.lower())
+
+    def test_section_ready_for_draft_degrades_under_low_evidence(self):
+        # With only 1-2 total cards, the system should still allow drafting at least one section
+        # for a partial report if the evidence is strong/verified.
+        cards = [
+            {
+                "claim": "Artemis uses SLS and Orion for lunar missions.",
+                "source_url": "https://nasa.gov/artemis",
+                "source_title": "NASA Artemis",
+                "excerpt": "Artemis program details.",
+                "section_tag": "introduction",
+                "authority_score": 9,
+                "verification_status": "verified",
+                "confidence": 0.9,
+            }
+        ]
+        self.assertTrue(_section_is_ready_for_draft("Introduction", cards))
+
     def test_prioritize_outline_sections_prefers_supported_sections(self):
         sections = _prioritize_outline_sections(
             ["Pricing", "Adoption", "Background", "Policy"],
