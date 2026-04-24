@@ -2,7 +2,13 @@
 
 import { create } from "zustand";
 
-import type { ResearchEvent, ResearchSessionState, ResearchStatus, SessionSnapshot } from "@/features/research/types/research";
+import type {
+  ResearchEvent,
+  ResearchSessionState,
+  ResearchStatus,
+  SessionSnapshot,
+  StructuredReference,
+} from "@/features/research/types/research";
 import { mapEventToTimeline } from "@/features/research/utils/map-event-to-timeline";
 import { parseSourcesFromMarkdown } from "@/features/research/utils/parse-sources";
 
@@ -38,6 +44,32 @@ function mergeSources(existing: ResearchSessionState["sources"], urls: string[],
     ...source,
     index: index + 1,
   }));
+}
+
+function sourcesFromStructuredReferences(references: StructuredReference[]) {
+  return references.flatMap((reference, index) => {
+    try {
+      const hostname = reference.hostname || new URL(reference.url).hostname.replace(/^www\./, "");
+      return [
+        {
+          id: reference.id || reference.url,
+          index: index + 1,
+          title: reference.title || hostname,
+          url: reference.url,
+          hostname,
+          note: reference.verification_status
+            ? `${reference.id} - ${reference.source_type ?? "source"} - ${reference.verification_status}`
+            : reference.id,
+          referenceId: reference.id,
+          evidenceIds: reference.evidence_ids ?? [],
+          sourceType: reference.source_type,
+          verificationStatus: reference.verification_status,
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
 }
 
 type ResearchSessionActions = {
@@ -168,7 +200,9 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
           };
         case "agent":
         case "outline":
+        case "evidence_brief":
         case "section_draft":
+        case "section_verification":
         case "evaluate":
         case "synthesize":
           return {
@@ -177,15 +211,20 @@ export const useResearchSessionStore = create<ResearchSessionStore>((set) => ({
             timeline,
           };
         case "report": {
-          const parsedSources = parseSourcesFromMarkdown(event.data.report);
+          const structuredSources = event.data.structured_references?.length
+            ? sourcesFromStructuredReferences(event.data.structured_references)
+            : [];
+          const parsedSources = structuredSources.length ? structuredSources : parseSourcesFromMarkdown(event.data.report);
           return {
             ...state,
             rawReport: event.data.report,
-            sources: mergeSources(
-              state.sources,
-              parsedSources.map((source) => source.url),
-              "Referenced in final report",
-            ).map((source) => parsedSources.find((parsed) => parsed.url === source.url) ?? source),
+            sources: structuredSources.length
+              ? structuredSources
+              : mergeSources(
+                  state.sources,
+                  parsedSources.map((source) => source.url),
+                  "Referenced in final report",
+                ).map((source) => parsedSources.find((parsed) => parsed.url === source.url) ?? source),
             visibleReport: "",
             timeline,
           };

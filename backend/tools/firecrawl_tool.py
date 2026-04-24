@@ -1,5 +1,7 @@
 import os
+import re
 import time
+from collections import OrderedDict
 
 from dotenv import load_dotenv
 
@@ -34,7 +36,8 @@ load_dotenv()
 
 _app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY")) if FirecrawlApp and os.getenv("FIRECRAWL_API_KEY") else None
 _ddg_search = DuckDuckGoSearchResults(output_format="list", num_results=12) if DuckDuckGoSearchResults else None
-_cache: dict[str, tuple[float, object]] = {}
+_cache: OrderedDict[str, tuple[float, object]] = OrderedDict()
+_url_query_hints: dict[str, str] = {}
 
 
 def _normalize_query(query: str) -> str:
@@ -48,11 +51,36 @@ def _cache_get(key: str):
     if expires_at <= time.time():
         _cache.pop(key, None)
         return None
+    _cache.move_to_end(key)
     return value
 
 
 def _cache_set(key: str, value, ttl_seconds: int) -> None:
+    settings = get_settings()
     _cache[key] = (time.time() + ttl_seconds, value)
+    _cache.move_to_end(key)
+    while len(_cache) > settings.search_scrape_cache_max_entries:
+        _cache.popitem(last=False)
+
+
+def _select_relevant_content_chunks(query: str, content: str) -> str:
+    from services.source_quality import fuzzy_token_overlap, query_tokens
+
+    settings = get_settings()
+    if not content.strip():
+        return content
+    chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n+", content) if chunk.strip()]
+    if len(chunks) <= settings.relevant_scrape_chunk_count:
+        return content
+    query_token_set = set(query_tokens(query))
+    ranked = [
+        (fuzzy_token_overlap(query_token_set, chunk), index, chunk)
+        for index, chunk in enumerate(chunks)
+    ]
+    ranked.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    chosen_indexes = sorted(index for _, index, _ in ranked[: settings.relevant_scrape_chunk_count])
+    chosen = [chunks[index] for index in chosen_indexes]
+    return "\n\n".join(chosen)
 
 
 # Minimum relevance score — results below this are dropped from the pipeline
@@ -64,6 +92,7 @@ def _coerce_search_result(title: str, url: str, snippet: str, query: str) -> dic
         return None
 
     normalized = normalize_url(url)
+    _url_query_hints.setdefault(normalized, query)
     if is_generic_low_signal_result(query, title, snippet, normalized):
         return None
 
@@ -181,10 +210,11 @@ def scrape(url: str) -> dict:
         try:
             response = _app.scrape(normalized_url, formats=["markdown"])
             if response and response.markdown:
+                content = _select_relevant_content_chunks(_url_query_hints.get(normalized_url, ""), response.markdown)
                 payload = {
                     "url": normalized_url,
                     "title": response.metadata.title if response.metadata else "",
-                    "content": response.markdown,
+                    "content": content,
                     "success": True,
                 }
         except Exception:
@@ -196,6 +226,7 @@ def scrape(url: str) -> dict:
             if downloaded:
                 content = trafilatura.extract(downloaded, include_links=True, include_images=False)
                 if content:
+                    content = _select_relevant_content_chunks(_url_query_hints.get(normalized_url, ""), content)
                     payload = {
                         "url": normalized_url,
                         "title": "Extracted Content",

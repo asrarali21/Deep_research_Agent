@@ -4,12 +4,16 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from agents.lead_orchestrator_agent import (
+    _build_research_contract,
     _build_section_packets,
     _build_references_section,
+    _build_structured_references,
+    _classify_query_type,
     _filter_body_sections,
     _find_missing_sections,
     _prioritize_outline_sections,
     _select_priority_sections,
+    _select_sections_for_verification,
     _section_is_ready_for_draft,
     _select_section_evidence,
     _target_body_section_count,
@@ -134,6 +138,8 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                 "thread_id": "thread-123",
                 "original_query": "query",
                 "depth_profile": "deep",
+                "research_contract": {},
+                "depth_budget": {},
                 "research_plan": ["Task A"],
                 "required_sections": [],
                 "pending_tasks": [],
@@ -153,7 +159,9 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                 "section_packets": [],
                 "priority_sections": [],
                 "section_drafts": {},
+                "section_verifications": {},
                 "report_reference_urls": [],
+                "structured_references": [],
                 "final_report": "",
             }
         )
@@ -318,6 +326,37 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("[Verified](https://verified.example/a)", references)
         self.assertIn("unverified", references.lower())
+
+    def test_structured_references_have_stable_ids_and_evidence_ids(self):
+        references = _build_structured_references(
+            [
+                {
+                    "evidence_id": "E2",
+                    "claim": "Pricing claim",
+                    "source_url": "https://example.com/pricing",
+                    "source_title": "Pricing Source",
+                    "excerpt": "Pricing excerpt.",
+                    "source_type": "news",
+                    "verification_status": "verified",
+                }
+            ],
+            reference_urls=["https://example.com/pricing"],
+        )
+
+        self.assertEqual(references[0]["id"], "R1")
+        self.assertEqual(references[0]["evidence_ids"], ["E2"])
+        self.assertEqual(references[0]["hostname"], "example.com")
+
+    def test_research_contract_classifies_market_queries(self):
+        contract = _build_research_contract(
+            "AI agents market size, pricing, adoption, and forecast in 2026",
+            ["Market Size", "Pricing", "Adoption"],
+        )
+
+        self.assertEqual(_classify_query_type("AI agents market size and pricing"), "market")
+        self.assertEqual(contract["query_type"], "market")
+        self.assertIn("pricing or adoption data", contract["required_evidence_types"])
+        self.assertTrue(contract["depth_requirements"]["requires_numeric_evidence"])
 
     def test_section_ready_for_draft_degrades_under_low_evidence(self):
         # With only 1-2 total cards, the system should still allow drafting at least one section
@@ -634,6 +673,71 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pricing", priority_sections)
         self.assertNotIn("Background", priority_sections)
 
+    def test_section_packets_include_evidence_brief_fields(self):
+        contract = _build_research_contract("AI agents pricing benchmark and market growth", ["Pricing"])
+        packets = _build_section_packets(
+            ["Pricing"],
+            "AI agents pricing benchmark and market growth",
+            [],
+            [
+                {
+                    "evidence_id": "E1",
+                    "claim": "Enterprise deployments exceed $100,000 annually.",
+                    "source_url": "https://example.com/pricing-a",
+                    "source_title": "Pricing A",
+                    "excerpt": "Enterprise deployments exceed $100,000 annually in 2025.",
+                    "section_tag": "pricing",
+                    "authority_score": 8,
+                    "verification_status": "verified",
+                },
+                {
+                    "evidence_id": "E2",
+                    "claim": "Usage-based pricing is common for AI agents.",
+                    "source_url": "https://example.com/pricing-b",
+                    "source_title": "Pricing B",
+                    "excerpt": "Usage-based pricing is common in enterprise AI agent deals.",
+                    "section_tag": "pricing",
+                    "authority_score": 7,
+                    "verification_status": "verified",
+                },
+            ],
+            contract,
+        )
+
+        packet = packets[0]
+        self.assertIn("core_question", packet)
+        self.assertIn("supporting_claims", packet)
+        self.assertIn("required_tables", packet)
+        self.assertGreater(packet["readiness_score"], 0)
+
+    def test_select_sections_for_verification_targets_priority_and_risky_sections(self):
+        sections = _select_sections_for_verification(
+            {
+                "Market Size": "Market reached $7.2B in 2025 [E1]. | Metric | Value |\n|---|---|",
+                "Background": "The market is rapidly evolving with significant growth.",
+            },
+            [
+                {
+                    "section": "Market Size",
+                    "readiness_score": 85,
+                    "best_evidence_cards": [{"evidence_id": "E1"}],
+                    "required_tables": ["comparison table"],
+                    "missing_evidence": [],
+                },
+                {
+                    "section": "Background",
+                    "readiness_score": 45,
+                    "best_evidence_cards": [{"evidence_id": "E2"}],
+                    "required_tables": [],
+                    "missing_evidence": ["more distinct sources"],
+                },
+            ],
+            ["Market Size"],
+        )
+
+        self.assertIn("Market Size", sections)
+        self.assertIn("Background", sections)
+
     async def test_quota_unavailable_jobs_wait_and_requeue_instead_of_failing(self):
         local_store = InMemoryCoordinationStore()
         await local_store.start()
@@ -676,6 +780,8 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                     "thread_id": thread_id,
                     "original_query": "query",
                     "depth_profile": "deep",
+                    "research_contract": {},
+                    "depth_budget": {},
                     "human_feedback": "",
                     "research_plan": [],
                     "required_sections": [],
@@ -695,7 +801,9 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
                     "section_packets": [],
                     "priority_sections": [],
                     "section_drafts": {},
+                    "section_verifications": {},
                     "report_reference_urls": [],
+                    "structured_references": [],
                     "final_report": "",
                 },
             },

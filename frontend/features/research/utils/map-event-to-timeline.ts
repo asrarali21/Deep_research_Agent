@@ -73,11 +73,25 @@ export function mapEventToTimeline(event: ResearchEvent): TimelineItem | null {
       );
     case "outline":
       return makeTimelineItem("plan", "Report outline created", undefined, event.data.sections);
+    case "evidence_brief":
+      return makeTimelineItem(
+        "plan",
+        "Section evidence briefs built",
+        `${event.data.section_count} section briefs prepared before drafting.`,
+        event.data.priority_sections,
+      );
     case "section_draft":
       return makeTimelineItem(
         "synthesize",
         `Drafted section: ${event.data.section}`,
         `${event.data.char_count} characters generated for this section.`,
+      );
+    case "section_verification":
+      return makeTimelineItem(
+        "evaluate",
+        "Verified high-risk sections",
+        `${event.data.verification_count} section checks completed.`,
+        event.data.verified_sections,
       );
     case "synthesize":
       return makeTimelineItem(

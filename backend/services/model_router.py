@@ -608,6 +608,17 @@ class CerebrasProvider:
 # ModelRouter
 # ---------------------------------------------------------------------------
 
+DEFAULT_TASK_TYPES = (
+    "planner",
+    "evaluator",
+    "synthesis",
+    "worker_tool_calling",
+    "evidence_brief",
+    "section_verifier",
+    "section_repair",
+)
+
+
 class ModelRouter:
     def __init__(
         self,
@@ -629,7 +640,7 @@ class ModelRouter:
                     name=name,
                     provider_type="test",
                     model=name,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=60,
                     token_limit_per_minute=1_000_000,
@@ -653,7 +664,7 @@ class ModelRouter:
                     name="groq",
                     provider_type="groq",
                     model=self._settings.groq_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=self._settings.groq_request_limit_per_minute,
                     token_limit_per_minute=self._settings.groq_token_limit_per_minute,
@@ -669,7 +680,7 @@ class ModelRouter:
                     name="groq_secondary",
                     provider_type="groq",
                     model=self._settings.groq_secondary_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=self._settings.groq_secondary_request_limit_per_minute,
                     token_limit_per_minute=self._settings.groq_secondary_token_limit_per_minute,
@@ -685,7 +696,7 @@ class ModelRouter:
                     name="groq_tertiary",
                     provider_type="groq",
                     model=self._settings.groq_tertiary_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=self._settings.groq_tertiary_request_limit_per_minute,
                     token_limit_per_minute=self._settings.groq_tertiary_token_limit_per_minute,
@@ -701,7 +712,7 @@ class ModelRouter:
                     name="cerebras",
                     provider_type="cerebras",
                     model=self._settings.cerebras_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=self._settings.cerebras_request_limit_per_minute,
                     token_limit_per_minute=self._settings.cerebras_token_limit_per_minute,
@@ -717,7 +728,7 @@ class ModelRouter:
                     name="cerebras_secondary",
                     provider_type="cerebras",
                     model=self._settings.cerebras_secondary_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=0,
                     request_limit_per_minute=self._settings.cerebras_secondary_request_limit_per_minute,
                     token_limit_per_minute=self._settings.cerebras_secondary_token_limit_per_minute,
@@ -733,7 +744,7 @@ class ModelRouter:
                     name="gemini",
                     provider_type="gemini",
                     model=self._settings.gemini_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=1,
                     request_limit_per_minute=self._settings.gemini_request_limit_per_minute,
                     token_limit_per_minute=self._settings.gemini_token_limit_per_minute,
@@ -749,7 +760,7 @@ class ModelRouter:
                     name="openrouter",
                     provider_type="openrouter",
                     model=self._settings.openrouter_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=2,
                     request_limit_per_minute=self._settings.openrouter_request_limit_per_minute,
                     token_limit_per_minute=self._settings.openrouter_token_limit_per_minute,
@@ -766,7 +777,7 @@ class ModelRouter:
                     name="huggingface",
                     provider_type="huggingface",
                     model=self._settings.huggingface_model,
-                    task_types=("planner", "evaluator", "synthesis", "worker_tool_calling"),
+                    task_types=DEFAULT_TASK_TYPES,
                     priority=3,
                     request_limit_per_minute=self._settings.huggingface_request_limit_per_minute,
                     token_limit_per_minute=self._settings.huggingface_token_limit_per_minute,

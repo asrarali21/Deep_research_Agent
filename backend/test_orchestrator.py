@@ -36,6 +36,8 @@ async def main():
         "thread_id": "test_session_1",
         "original_query": query,
         "depth_profile": "deep",
+        "research_contract": {},
+        "depth_budget": {},
         "research_plan": [],
         "required_sections": [],
         "pending_tasks": [],
@@ -55,7 +57,9 @@ async def main():
         "section_packets": [],
         "priority_sections": [],
         "section_drafts": {},
+        "section_verifications": {},
         "report_reference_urls": [],
+        "structured_references": [],
         "final_report": "",
     }
 

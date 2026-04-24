@@ -94,14 +94,34 @@ export type SectionDraftEvent = {
   data: { thread_id: string; section: string; status: "section_drafted"; char_count: number };
 };
 
+export type EvidenceBriefEvent = {
+  event: "evidence_brief";
+  data: { thread_id: string; section_count: number; priority_sections: string[] };
+};
+
+export type SectionVerificationEvent = {
+  event: "section_verification";
+  data: { thread_id: string; verified_sections: string[]; verification_count: number };
+};
+
 export type SynthesizeEvent = {
   event: "synthesize";
   data: { thread_id: string; status: "finalizing_report" | "final_editing_report" };
 };
 
+export type StructuredReference = {
+  id: string;
+  evidence_ids?: string[];
+  title: string;
+  url: string;
+  hostname?: string;
+  source_type?: string;
+  verification_status?: string;
+};
+
 export type ReportEvent = {
   event: "report";
-  data: { thread_id: string; report: string };
+  data: { thread_id: string; report: string; structured_references?: StructuredReference[] };
 };
 
 export type PausedEvent = {
@@ -134,7 +154,9 @@ export type ResearchEvent =
   | EvidenceBatchEvent
   | EvaluateEvent
   | OutlineEvent
+  | EvidenceBriefEvent
   | SectionDraftEvent
+  | SectionVerificationEvent
   | SynthesizeEvent
   | ReportEvent
   | PausedEvent
@@ -158,6 +180,10 @@ export type SourceCard = {
   url: string;
   hostname: string;
   note?: string;
+  referenceId?: string;
+  evidenceIds?: string[];
+  sourceType?: string;
+  verificationStatus?: string;
 };
 
 export type ResearchSessionState = {

@@ -106,6 +106,22 @@ export const researchEventSchema = z.discriminatedUnion("event", [
     }),
   }),
   z.object({
+    event: z.literal("evidence_brief"),
+    data: z.object({
+      thread_id: z.string(),
+      section_count: z.number(),
+      priority_sections: z.array(z.string()),
+    }),
+  }),
+  z.object({
+    event: z.literal("section_verification"),
+    data: z.object({
+      thread_id: z.string(),
+      verified_sections: z.array(z.string()),
+      verification_count: z.number(),
+    }),
+  }),
+  z.object({
     event: z.literal("synthesize"),
     data: z.object({
       thread_id: z.string(),
@@ -114,7 +130,23 @@ export const researchEventSchema = z.discriminatedUnion("event", [
   }),
   z.object({
     event: z.literal("report"),
-    data: z.object({ thread_id: z.string(), report: z.string() }),
+    data: z.object({
+      thread_id: z.string(),
+      report: z.string(),
+      structured_references: z
+        .array(
+          z.object({
+            id: z.string(),
+            evidence_ids: z.array(z.string()).optional(),
+            title: z.string(),
+            url: z.string(),
+            hostname: z.string().optional(),
+            source_type: z.string().optional(),
+            verification_status: z.string().optional(),
+          }),
+        )
+        .optional(),
+    }),
   }),
   z.object({
     event: z.literal("paused"),

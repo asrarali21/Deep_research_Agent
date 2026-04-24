@@ -73,6 +73,8 @@ class ResearchJobManager:
             "thread_id": thread_id,
             "original_query": query,
             "depth_profile": "deep",
+            "research_contract": {},
+            "depth_budget": {},
             "human_feedback": "",
             "research_plan": [],
             "required_sections": [],
@@ -92,7 +94,9 @@ class ResearchJobManager:
             "section_packets": [],
             "priority_sections": [],
             "section_drafts": {},
+            "section_verifications": {},
             "report_reference_urls": [],
+            "structured_references": [],
             "final_report": "",
         }
         record = {
@@ -279,7 +283,16 @@ class ResearchJobManager:
                 waiting_task_type="",
             )
             if final_report:
-                await self.publish_event(thread_id, "report", {"thread_id": thread_id, "report": final_report})
+                structured_references = state.values.get("structured_references", []) if state and state.values else []
+                await self.publish_event(
+                    thread_id,
+                    "report",
+                    {
+                        "thread_id": thread_id,
+                        "report": final_report,
+                        "structured_references": structured_references,
+                    },
+                )
             await self.publish_event(thread_id, "done", {"thread_id": thread_id, "status": "done"})
         except ProviderUnavailableError as error:
             if error.should_wait_for_retryable_provider:
@@ -398,6 +411,16 @@ class ResearchJobManager:
                         "sections": updates.get("outline_sections", []),
                     },
                 )
+            elif node_name == "build_evidence_briefs_node":
+                await self.publish_event(
+                    thread_id,
+                    "evidence_brief",
+                    {
+                        "thread_id": thread_id,
+                        "section_count": len(updates.get("section_packets", [])),
+                        "priority_sections": updates.get("priority_sections", []),
+                    },
+                )
             elif node_name == "draft_sections_node":
                 for section, content in updates.get("section_drafts", {}).items():
                     await self.publish_event(
@@ -410,6 +433,16 @@ class ResearchJobManager:
                             "char_count": len(content),
                         },
                     )
+            elif node_name == "verify_sections_node":
+                await self.publish_event(
+                    thread_id,
+                    "section_verification",
+                    {
+                        "thread_id": thread_id,
+                        "verified_sections": list(updates.get("section_verifications", {}).keys()),
+                        "verification_count": len(updates.get("section_verifications", {})),
+                    },
+                )
             elif node_name in {"final_edit_node", "synthesize_node"}:
                 await self.publish_event(
                     thread_id,

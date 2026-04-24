@@ -59,6 +59,11 @@ class Settings:
     min_distinct_sources_per_draftable_section: int
     min_quant_signals_for_numeric_sections: int
     max_targeted_gap_rounds_deep: int
+    max_verifier_sections: int
+    max_repair_passes: int
+    max_priority_expansions: int
+    search_scrape_cache_max_entries: int
+    relevant_scrape_chunk_count: int
     provider_cooldown_seconds: int
     quota_cooldown_seconds: int
     rate_limit_max_cooldown_seconds: int
@@ -149,6 +154,11 @@ def get_settings() -> Settings:
         min_distinct_sources_per_draftable_section=_int("MIN_DISTINCT_SOURCES_PER_DRAFTABLE_SECTION", 2),
         min_quant_signals_for_numeric_sections=_int("MIN_QUANT_SIGNALS_FOR_NUMERIC_SECTIONS", 1),
         max_targeted_gap_rounds_deep=_int("MAX_TARGETED_GAP_ROUNDS_DEEP", 1),
+        max_verifier_sections=_int("MAX_VERIFIER_SECTIONS", 2),
+        max_repair_passes=_int("MAX_REPAIR_PASSES", 1),
+        max_priority_expansions=_int("MAX_PRIORITY_EXPANSIONS", 2),
+        search_scrape_cache_max_entries=_int("SEARCH_SCRAPE_CACHE_MAX_ENTRIES", 256),
+        relevant_scrape_chunk_count=_int("RELEVANT_SCRAPE_CHUNK_COUNT", 4),
         # --- Provider resilience timers ---
         # Cooldown after a confirmed rate-limit 429 from the provider API
         provider_cooldown_seconds=_int("PROVIDER_COOLDOWN_SECONDS", 20),
