@@ -1,195 +1,132 @@
 # deep_research
 
-`deep_research` is a local deep-research app with a FastAPI backend and a Next.js frontend. A user submits a research question, reviews the generated plan, then resumes the run to collect sources, evidence cards, section drafts, and a final Markdown report.
+`deep_research` is a multi-agent research application that turns a user query into a source-backed Markdown report.
 
-The backend uses LangGraph to coordinate research tasks and streams progress to the frontend over server-sent events.
+The system does not answer directly from a single prompt. It plans the research, pauses for plan review, sends scoped tasks to worker agents, validates evidence, fills coverage gaps, drafts report sections from supported material, and assembles the final report with references.
 
-## Repository Layout
+## Architecture
 
-- `backend/` - FastAPI app, LangGraph agents, provider routing, search/scrape tools, job queue, and backend tests.
-- `frontend/` - Next.js chat UI, streamed research state, source panel, local session persistence, and frontend tests.
-- `docker-compose.yml` - PostgreSQL and Redis services for local development.
-- `services/` - currently contains an empty placeholder file.
+```mermaid
+flowchart TD
+  Query["User query"] --> Lead["Lead orchestrator"]
+  Lead --> Plan["Research plan"]
+  Plan --> Review["Plan review pause"]
+  Review --> Dispatch["Task dispatch"]
+  Dispatch --> WorkerA["Worker agent"]
+  Dispatch --> WorkerB["Worker agent"]
+  Dispatch --> WorkerC["Worker agent"]
+  WorkerA --> Evidence["Evidence cards"]
+  WorkerB --> Evidence
+  WorkerC --> Evidence
+  Evidence --> Evaluate["Coverage evaluation"]
+  Evaluate -->|gaps found| Dispatch
+  Evaluate -->|enough evidence| Sections["Section drafting"]
+  Sections --> Verify["Section verification"]
+  Verify --> Report["Final Markdown report"]
 
-## Architecture / How It Works
-
-1. The frontend posts a query to `POST /api/research/start`.
-2. The backend creates a job record, queues the job, and starts an SSE stream.
-3. The lead orchestrator decomposes the query into research tasks and pauses before plan execution.
-4. The frontend shows the plan. The user can continue as-is or send feedback through `POST /api/research/resume`.
-5. Sub-agents run bounded search/scrape loops, submit findings, and produce structured evidence cards.
-6. The orchestrator evaluates coverage, fills gaps when needed, builds section packets, drafts sections, verifies selected sections, and assembles the final report.
-7. The frontend renders timeline updates, sources, status, and the final Markdown report.
-
-Key backend pieces:
-
-- `backend/main.py` - FastAPI app setup, PostgreSQL checkpoint setup, runtime initialization.
-- `backend/api/user_query.py` - research start/resume/status endpoints and SSE formatting.
-- `backend/services/job_manager.py` - job queue, replayable events, status tracking, quota-wait requeue handling.
-- `backend/agents/lead_orchestrator_agent.py` - LangGraph research workflow.
-- `backend/agents/sub_agent.py` - worker graph for search, scrape, and evidence submission.
-- `backend/services/model_router.py` - model-provider selection, local quota guards, retries, cooldowns, and fallback.
-- `backend/tools/firecrawl_tool.py` - search and scrape helpers with Firecrawl, DuckDuckGo, and trafilatura paths.
-
-## Requirements
-
-- Python 3.11+ recommended for the backend.
-- Node.js and npm for the frontend.
-- Docker for PostgreSQL and Redis.
-- At least one model provider API key:
-  - `GROQ_API_KEY`
-  - `CEREBRAS_API_KEY`
-  - `GEMINI_API_KEY`
-  - `OPENROUTER_API_KEY` or `OPEN_ROUTER_API_KEY`
-  - `HUGGINGFACE_API_KEY`
-- Optional search/scrape key:
-  - `FIRECRAWL_API_KEY`
-
-## Configuration
-
-Backend environment variables:
-
-```bash
-POSTGRES_DB_URL=postgresql://researcher:research_pass@localhost:5433/deep_research
-REDIS_URL=redis://localhost:6379/0
-GROQ_API_KEY=your_groq_key
-FIRECRAWL_API_KEY=your_firecrawl_key
+  Lead --> Router["Model router"]
+  WorkerA --> Router
+  WorkerB --> Router
+  WorkerC --> Router
+  Router --> Providers["Configured LLM providers"]
 ```
 
-The backend also supports tuning variables for queue limits, evidence thresholds, model names, provider rate limits, token budgets, and cooldowns. See `backend/services/config.py` for the full list and defaults.
+The application is organized around a lead-worker model:
 
-Frontend environment variables:
+- the lead orchestrator owns the research plan, coverage checks, section structure, and final synthesis
+- worker agents independently collect evidence for narrow research tasks
+- a model router selects from available LLM providers and handles fallback when a provider is rate-limited or unavailable
+- checkpointing and job state allow long-running research flows to pause, resume, and stream progress
 
-```bash
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
-```
+## Lead Orchestrator
 
-If omitted, the frontend defaults to `http://localhost:8000`.
+The lead orchestrator is responsible for the full research lifecycle.
 
-## Installation
+It:
 
-Start local infrastructure:
+- decomposes the original query into focused research tasks
+- defines the report sections the answer should cover
+- builds a research contract based on query type and evidence needs
+- pauses after planning so the user can approve or revise the plan
+- dispatches worker agents with bounded tasks
+- evaluates whether collected evidence is sufficient
+- creates additional gap-research tasks when coverage is weak
+- builds section-level evidence packets
+- drafts, expands, verifies, and repairs report sections
+- assembles the final Markdown report and references
 
-```bash
-docker compose up -d
-```
+The lead agent does not simply merge worker output. It checks whether evidence is deep enough to support the report before drafting.
 
-Set up the backend:
+## Worker Agents
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install \
-  fastapi uvicorn pydantic python-dotenv \
-  langgraph langchain-core langchain-google-genai langchain-groq langchain-openai langchain-community \
-  psycopg[binary,pool] redis firecrawl-py trafilatura duckduckgo-search
-```
+Worker agents handle individual research tasks.
 
-No `requirements.txt` or `pyproject.toml` is currently committed for the backend. The command above is based on the imports used in `backend/`.
+Each worker follows a bounded loop:
 
-Set up the frontend:
+1. search for relevant sources
+2. scrape selected pages
+3. extract findings and evidence cards
+4. submit only evidence tied to scraped URLs
 
-```bash
-cd frontend
-npm install
-```
+Worker output is structured so the lead agent can evaluate it consistently:
 
-## Running Locally
+- factual findings
+- evidence-backed claims
+- source URLs
+- source titles
+- excerpts
+- source type
+- authority score
+- confidence score
+- coverage tags
 
-Run the backend from the `backend/` directory so its local imports resolve:
+This structure keeps the final report tied to traceable sources instead of free-form summaries.
 
-```bash
-cd backend
-source ../.venv/bin/activate
-uvicorn main:app --host localhost --port 8000 --reload
-```
+## Evidence Flow
 
-Run the frontend:
+Evidence moves through the system in stages:
 
-```bash
-cd frontend
-npm run dev
-```
+1. workers discover and scrape sources
+2. low-value, duplicate, or irrelevant sources are filtered
+3. evidence cards are validated against scraped URLs
+4. the lead agent checks source diversity, authority, and section coverage
+5. weak sections trigger targeted follow-up research
+6. supported evidence is grouped into section packets
+7. drafted sections cite evidence IDs before the final report is assembled
 
-Open the app at:
+The system can produce a partial report when enough evidence exists for some sections but not the full planned outline.
 
-```text
-http://localhost:3000
-```
+## Model Routing
 
-Health check:
+Model calls are routed through a provider layer rather than hardcoded to one model.
 
-```bash
-curl http://localhost:8000/health
-```
+The router supports:
 
-## API
+- planning
+- evaluation
+- worker tool-calling
+- evidence brief generation
+- section drafting
+- section verification
+- section repair
+- final synthesis
 
-### `GET /health`
+It tracks local request and token budgets, applies provider cooldowns, and can switch providers when one is unavailable.
 
-Returns a basic backend health response.
+## Output
 
-### `POST /api/research/start`
+The final output is a Markdown report built from validated evidence. A typical report includes:
 
-Starts a research run and returns an SSE stream.
-
-Request body:
-
-```json
-{
-  "query": "Research question"
-}
-```
-
-The response includes an `X-Thread-ID` header. Events may include `queued`, `started`, `plan`, `source_batch`, `evidence_batch`, `evaluate`, `outline`, `evidence_brief`, `section_draft`, `section_verification`, `synthesize`, `report`, `paused`, `done`, `failed`, `heartbeat`, and `waiting_for_quota`.
-
-### `POST /api/research/resume`
-
-Resumes a paused run after plan review.
-
-Request body:
-
-```json
-{
-  "thread_id": "existing-thread-id",
-  "feedback": "Optional plan feedback"
-}
-```
-
-### `GET /api/research/status/{thread_id}`
-
-Returns queue position, status, plan, evidence counts, retry counts, provider switch counts, quota wait details, and the last error.
-
-## Testing
-
-Backend tests:
-
-```bash
-cd backend
-python -m unittest discover tests
-```
-
-Frontend tests:
-
-```bash
-cd frontend
-npm test
-```
+- title
+- executive summary
+- key findings
+- evidence and methodology notes
+- body sections
+- limitations when evidence is incomplete
+- conclusion
+- references
 
 ## Output Examples
 
 _Add real outputs here_
 
-## Limitations / Trade-offs
-
-- Backend dependencies are not pinned in a committed manifest yet.
-- The backend requires PostgreSQL for LangGraph checkpoints.
-- Redis is optional at runtime; if Redis cannot be reached, coordination falls back to an in-memory store.
-- Runs pause after plan generation because the graph is compiled with an interrupt before `plan_review_node`.
-- Search and scrape quality depends on configured tools and upstream availability.
-- Provider quotas can pause jobs; the job manager emits `waiting_for_quota` and requeues after the cooldown.
-- CORS is currently configured with `allow_origins=["*"]`; restrict this before deployment.
-
-## License
-
-No license file is currently included.
