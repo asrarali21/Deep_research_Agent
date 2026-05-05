@@ -50,10 +50,10 @@ export function InputBox({
   };
 
   return (
-    <div className="rounded-panel border border-white/10 bg-surface-1/90 p-3 shadow-panel">
-      <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-muted">
+    <div className="rounded-panel border border-white/[0.1] bg-surface-1/95 p-2 shadow-[0_22px_64px_rgba(0,0,0,0.38)]">
+      <div className="mb-1 flex items-center gap-2 px-2 pt-1 text-xs font-medium uppercase text-muted">
         {mode === "query" ? <Sparkles className="h-3.5 w-3.5" /> : <Send className="h-3.5 w-3.5" />}
-        {mode === "query" ? "New research brief" : "Plan feedback"}
+        {mode === "query" ? "Research brief" : "Plan feedback"}
       </div>
       <div className="flex flex-col gap-3">
         <Textarea
@@ -66,10 +66,9 @@ export function InputBox({
           onCompositionEnd={() => setIsComposing(false)}
           disabled={disabled}
           placeholder={placeholder}
-          className="max-h-56 min-h-[56px] resize-none"
+          className="max-h-56 min-h-[58px] resize-none border-0 bg-transparent px-2 text-base shadow-none focus:bg-transparent sm:text-sm"
         />
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs text-muted">Press Enter to submit, Shift+Enter for a new line.</p>
+        <div className="flex items-center justify-end gap-3 border-t border-white/[0.08] px-1 pt-2">
           <Button onClick={onSubmit} disabled={disabled || !value.trim()}>
             <Send className="h-4 w-4" />
             {submitLabel ?? (mode === "query" ? "Start research" : "Resume research")}

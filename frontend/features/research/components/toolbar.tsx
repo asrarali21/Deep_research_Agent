@@ -20,7 +20,7 @@ export function Toolbar({ canStop, canRetry, canRegenerate, report, onStop, onRe
   const [copied, setCopied] = useState(false);
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2 rounded-panel border border-white/[0.08] bg-surface-1/55 p-1">
       <Button
         variant="secondary"
         size="sm"

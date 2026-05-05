@@ -5,11 +5,11 @@ import { cn } from "@/lib/cn";
 type BadgeVariant = "neutral" | "success" | "warning" | "danger" | "accent";
 
 const variantClasses: Record<BadgeVariant, string> = {
-  neutral: "border-white/10 bg-white/[0.04] text-muted",
-  success: "border-success/20 bg-success/10 text-success",
-  warning: "border-warning/20 bg-warning/10 text-warning",
-  danger: "border-danger/20 bg-danger/10 text-danger",
-  accent: "border-accent/20 bg-accent/10 text-accent",
+  neutral: "border-white/[0.09] bg-white/[0.04] text-muted",
+  success: "border-success/25 bg-success/10 text-success",
+  warning: "border-warning/25 bg-warning/10 text-warning",
+  danger: "border-danger/25 bg-danger/10 text-danger",
+  accent: "border-accent/25 bg-accent/10 text-accent",
 };
 
 type BadgeProps = HTMLAttributes<HTMLSpanElement> & {

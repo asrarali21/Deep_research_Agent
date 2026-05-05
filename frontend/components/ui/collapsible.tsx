@@ -16,11 +16,11 @@ type CollapsibleProps = PropsWithChildren<{
 
 export function Collapsible({ title, subtitle, open, onToggle, className, children }: CollapsibleProps) {
   return (
-    <div className={cn("rounded-panel border border-white/10 bg-white/[0.02]", className)}>
+    <div className={cn("rounded-panel border border-white/[0.09] bg-surface-1/70 shadow-panel", className)}>
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left"
+        className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-white/[0.035]"
       >
         <div>
           <p className="font-medium text-text">{title}</p>

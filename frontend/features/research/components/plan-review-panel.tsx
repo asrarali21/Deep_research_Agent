@@ -1,9 +1,10 @@
 "use client";
 
-import { Plus, Wand2 } from "lucide-react";
+import { Plus, Wand2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Textarea } from "@/components/ui/textarea";
 
 type PlanReviewPanelProps = {
@@ -28,13 +29,11 @@ export function PlanReviewPanel({ plan, onChange, onResume, onContinue, disabled
   };
 
   return (
-    <div className="rounded-panel border border-warning/20 bg-warning/10 p-5">
+    <div className="rounded-panel border border-warning/25 bg-warning/10 p-5 shadow-panel">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <p className="font-display text-lg font-semibold text-text">Approve or revise the plan</p>
-          <p className="mt-1 text-sm text-muted">
-            The backend is paused at the planning checkpoint. Edit tasks if needed, then resume.
-          </p>
+          <p className="mt-1 text-sm text-muted">Adjust the tasks before the run continues.</p>
         </div>
       </div>
 
@@ -51,13 +50,13 @@ export function PlanReviewPanel({ plan, onChange, onResume, onContinue, disabled
               }}
               className="min-h-[68px]"
             />
-            <Button
-              variant="ghost"
-              className="self-start"
+            <IconButton
+              aria-label={`Remove task ${index + 1}`}
+              className="self-start rounded-panel"
               onClick={() => updateItems(items.filter((_, itemIndex) => itemIndex !== index))}
             >
-              Remove
-            </Button>
+              <X className="h-4 w-4" />
+            </IconButton>
           </div>
         ))}
 
@@ -69,7 +68,7 @@ export function PlanReviewPanel({ plan, onChange, onResume, onContinue, disabled
         <Textarea
           value={note}
           onChange={(event) => setNote(event.target.value)}
-          placeholder="Optional guidance for the orchestrator. Example: prioritize company filings over news articles."
+          placeholder="Add guidance for the next pass."
           className="min-h-[110px]"
         />
 

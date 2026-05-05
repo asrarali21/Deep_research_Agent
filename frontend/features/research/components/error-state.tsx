@@ -38,9 +38,9 @@ export function ErrorState({ error, onRetry, onRegenerate, rateLimitResetAt, que
   const queueCountdown = useCountdown(queueRetryAt);
 
   return (
-    <SectionCard className="border-danger/20 bg-danger/10 p-5">
+    <SectionCard className="border-danger/25 bg-danger/10 p-5">
       <div className="flex items-start gap-3">
-        <div className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-danger/15 text-danger">
+        <div className="inline-flex h-10 w-10 items-center justify-center rounded-panel border border-danger/20 bg-danger/15 text-danger">
           <TriangleAlert className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">

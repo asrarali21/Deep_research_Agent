@@ -24,11 +24,11 @@ const config: Config = {
         border: "rgb(var(--border) / <alpha-value>)",
       },
       borderRadius: {
-        panel: "20px",
-        field: "16px",
+        panel: "8px",
+        field: "8px",
       },
       boxShadow: {
-        panel: "0 20px 60px rgba(0, 0, 0, 0.28)",
+        panel: "0 20px 56px rgba(0, 0, 0, 0.34)",
       },
       fontFamily: {
         sans: ["var(--font-manrope)", "sans-serif"],
@@ -37,10 +37,10 @@ const config: Config = {
       },
       backgroundImage: {
         "grid-fade":
-          "radial-gradient(circle at top, rgba(103, 232, 249, 0.08), transparent 32%), linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px)",
+          "linear-gradient(115deg, rgba(99,222,169,0.08), transparent 28%, rgba(242,184,82,0.06) 72%, transparent), linear-gradient(rgba(245,238,218,0.032) 1px, transparent 1px), linear-gradient(90deg, rgba(245,238,218,0.032) 1px, transparent 1px)",
       },
       backgroundSize: {
-        "grid-fade": "100% 100%, 36px 36px, 36px 36px",
+        "grid-fade": "100% 100%, 44px 44px, 44px 44px",
       },
       animation: {
         "pulse-soft": "pulseSoft 2.4s ease-in-out infinite",

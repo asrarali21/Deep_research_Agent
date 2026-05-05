@@ -37,12 +37,12 @@ export function ThinkingSection({ items, status, open, onToggle }: ThinkingSecti
   return (
     <Collapsible
       title="Research process"
-      subtitle={status === "done" ? "Completed timeline" : "Live workflow timeline"}
+      subtitle={status === "done" ? "Completed" : "In progress"}
       open={open}
       onToggle={onToggle}
     >
       {items.length ? (
-        <motion.div className="space-y-3" variants={staggerParent} initial="initial" animate="animate">
+        <motion.div className="space-y-4" variants={staggerParent} initial="initial" animate="animate">
           <AnimatePresence initial={false}>
             {items.map((item) => {
               const Icon = iconForKind(item.kind);
@@ -50,21 +50,21 @@ export function ThinkingSection({ items, status, open, onToggle }: ThinkingSecti
                 <motion.div
                   key={item.id}
                   {...fadeUp}
-                  className="rounded-[18px] border border-white/10 bg-white/[0.03] p-4"
+                  className="relative border-l border-white/[0.1] pl-5"
                 >
                   <div className="flex gap-3">
-                    <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-accent">
+                    <div className="-ml-[37px] mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent/20 bg-[#151812] text-accent shadow-[0_0_0_4px_rgba(18,18,15,0.95)]">
                       <Icon className="h-4 w-4" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-text">{item.title}</p>
-                      {item.description ? <p className="mt-1 text-sm text-muted">{item.description}</p> : null}
+                      {item.description ? <p className="mt-1 text-sm leading-6 text-muted">{item.description}</p> : null}
                       {item.meta?.length ? (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {item.meta.map((entry) => (
                             <span
                               key={`${item.id}-${entry}`}
-                              className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs text-muted"
+                              className="rounded-full border border-white/[0.09] bg-black/20 px-2.5 py-1 text-xs text-muted"
                             >
                               {entry}
                             </span>
@@ -79,7 +79,7 @@ export function ThinkingSection({ items, status, open, onToggle }: ThinkingSecti
           </AnimatePresence>
         </motion.div>
       ) : (
-        <p className="text-sm text-muted">Start a research run to see the orchestration timeline appear here.</p>
+        <p className="text-sm text-muted">The timeline is empty.</p>
       )}
     </Collapsible>
   );

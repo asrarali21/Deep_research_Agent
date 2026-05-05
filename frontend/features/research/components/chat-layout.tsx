@@ -50,7 +50,7 @@ export function ChatLayout() {
         />
       }
       main={
-        <div className="flex h-full min-h-[calc(100vh-140px)] flex-col gap-4">
+        <div className="flex h-full min-h-[calc(100vh-132px)] flex-col gap-3">
           <StatusStrip
             status={state.status}
             queuePosition={state.queuePosition}
@@ -60,7 +60,7 @@ export function ChatLayout() {
             evidenceCount={state.evidenceCardCount}
           />
 
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <Toolbar
               canStop={state.isStreaming}
               canRetry={state.status === "failed" && Boolean(state.query)}

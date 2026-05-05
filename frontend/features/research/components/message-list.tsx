@@ -45,8 +45,8 @@ export function MessageList({
     session.status === "done";
 
   return (
-    <ScrollArea ref={containerRef} className="h-[calc(100vh-280px)] pr-2">
-      <div className="space-y-5 pb-10">
+    <ScrollArea ref={containerRef} className="h-[calc(100vh-272px)] pr-1 sm:pr-2">
+      <div className="space-y-4 pb-10">
         {!session.query ? <EmptyState onExampleSelect={onExampleSelect} /> : null}
 
         {session.query ? (
@@ -66,13 +66,13 @@ export function MessageList({
 
         {session.showRecoveryBanner && session.threadId ? (
           <MessageBubble variant="system" title="Recovered session">
-            This browser restored your last known session snapshot. If the backend job already finished elsewhere, the report is only available if it was cached in this browser.
+            Your last session snapshot was restored. The report appears here if this browser cached it.
           </MessageBubble>
         ) : null}
 
         {session.stoppedByUser ? (
           <MessageBubble variant="system" title="Stream stopped">
-            Live streaming was stopped in this browser. The backend job may still continue on the server.
+            Streaming stopped in this browser. The server may still finish the run.
           </MessageBubble>
         ) : null}
 
@@ -84,7 +84,7 @@ export function MessageList({
 
         {session.status === "waiting_for_quota" ? (
           <MessageBubble variant="system" title="Waiting for provider quota">
-            The backend paused this run while provider quota resets.
+            This run is paused while provider quota resets.
             {session.waitingTaskType ? ` The blocked stage is ${session.waitingTaskType}.` : ""}
             {session.quotaWaitUntil ? " It will resume automatically once quota becomes available." : ""}
           </MessageBubble>

@@ -3,17 +3,17 @@
 @tailwind utilities;
 
 :root {
-  --bg: 9 11 16;
-  --surface: 17 20 27;
-  --surface-2: 23 27 35;
-  --border: 255 255 255;
-  --text: 245 247 251;
-  --muted: 153 163 181;
-  --accent: 103 232 249;
-  --accent-2: 56 189 248;
-  --success: 52 211 153;
-  --warning: 251 191 36;
-  --danger: 251 113 133;
+  --bg: 18 18 15;
+  --surface: 30 31 26;
+  --surface-2: 42 43 36;
+  --border: 245 238 218;
+  --text: 244 241 232;
+  --muted: 159 154 139;
+  --accent: 99 222 169;
+  --accent-2: 242 184 82;
+  --success: 86 211 148;
+  --warning: 242 184 82;
+  --danger: 248 113 113;
   --font-sora: "Avenir Next", "Montserrat", "Trebuchet MS", sans-serif;
   --font-manrope: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-plex-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", "Monaco", monospace;
@@ -31,8 +31,8 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at top, rgba(103, 232, 249, 0.12), transparent 35%),
-    linear-gradient(180deg, #090b10 0%, #0b0f14 100%);
+    repeating-linear-gradient(90deg, rgba(245, 238, 218, 0.025) 0 1px, transparent 1px 72px),
+    linear-gradient(135deg, #171711 0%, #10130f 48%, #17120e 100%);
   color: rgb(var(--text));
 }
 
@@ -48,20 +48,35 @@ a {
 }
 
 ::selection {
-  background: rgba(103, 232, 249, 0.25);
+  background: rgba(99, 222, 169, 0.24);
 }
 
 .app-grid-bg {
+  position: relative;
+  isolation: isolate;
   background-image:
-    radial-gradient(circle at top, rgba(103, 232, 249, 0.08), transparent 32%),
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 100% 100%, 36px 36px, 36px 36px;
+    linear-gradient(115deg, rgba(99, 222, 169, 0.08), transparent 28%, rgba(242, 184, 82, 0.06) 72%, transparent),
+    linear-gradient(rgba(245, 238, 218, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(245, 238, 218, 0.032) 1px, transparent 1px);
+  background-size: 100% 100%, 44px 44px, 44px 44px;
+}
+
+.app-grid-bg::before {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 18%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.4), transparent 24%, transparent 76%, rgba(0, 0, 0, 0.35));
+  content: "";
+  pointer-events: none;
 }
 
 .glass-panel {
-  backdrop-filter: blur(14px);
-  background: linear-gradient(180deg, rgba(17, 20, 27, 0.92), rgba(17, 20, 27, 0.82));
+  background:
+    linear-gradient(180deg, rgba(34, 35, 29, 0.92), rgba(20, 21, 17, 0.88)),
+    linear-gradient(135deg, rgba(99, 222, 169, 0.06), rgba(242, 184, 82, 0.04));
+  backdrop-filter: blur(18px);
 }
 
 .report-prose {
@@ -73,7 +88,7 @@ a {
 .report-prose h3,
 .report-prose h4 {
   font-family: var(--font-sora), sans-serif;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .report-prose h1 {

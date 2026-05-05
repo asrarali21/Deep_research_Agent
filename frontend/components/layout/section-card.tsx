@@ -10,7 +10,7 @@ export const SectionCard = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElem
     <div
       ref={ref}
       className={cn(
-        "glass-panel rounded-panel border border-white/10 shadow-panel",
+        "glass-panel rounded-panel border border-white/[0.09] shadow-panel ring-1 ring-black/20",
         className,
       )}
       {...props}

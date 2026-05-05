@@ -31,11 +31,11 @@ export function AIResponseRenderer({ markdown, isStreamingReveal }: AIResponseRe
 
   return (
     <motion.div {...fadeUp}>
-      <SectionCard className="overflow-hidden p-6 sm:p-8">
-        <div className="mb-5 flex items-center justify-between gap-4">
+      <SectionCard className="overflow-hidden">
+        <div className="flex items-center justify-between gap-4 border-b border-white/[0.08] p-4 sm:px-6">
           <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-muted">Final report</p>
-            <p className="mt-1 font-display text-2xl font-semibold tracking-tight text-text">Structured answer</p>
+            <p className="text-xs font-medium uppercase text-muted">Final report</p>
+            <p className="mt-1 font-display text-2xl font-semibold text-text">Structured answer</p>
           </div>
           {isStreamingReveal ? (
             <span className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-xs text-accent">
@@ -44,7 +44,7 @@ export function AIResponseRenderer({ markdown, isStreamingReveal }: AIResponseRe
           ) : null}
         </div>
 
-        <div className="report-prose">
+        <div className="report-prose p-5 sm:p-7">
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={markdownComponents}>
             {markdown}
           </ReactMarkdown>

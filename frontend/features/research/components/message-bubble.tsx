@@ -12,15 +12,15 @@ export function MessageBubble({ variant, title, className, children }: MessageBu
   return (
     <div
       className={cn(
-        "rounded-panel border px-5 py-4",
+        "max-w-[78ch] rounded-panel border px-5 py-4 shadow-panel",
         variant === "user"
-          ? "border-accent/20 bg-accent/10"
-          : "border-white/10 bg-white/[0.03]",
+          ? "ml-auto border-accent/25 bg-accent/10"
+          : "border-white/[0.09] bg-surface-1/72",
         className,
       )}
     >
-      {title ? <p className="mb-2 text-xs uppercase tracking-[0.22em] text-muted">{title}</p> : null}
-      <div className="text-sm text-text">{children}</div>
+      {title ? <p className="mb-2 text-xs font-medium uppercase text-muted">{title}</p> : null}
+      <div className="text-sm leading-7 text-text">{children}</div>
     </div>
   );
 }

@@ -13,14 +13,16 @@ type SidebarProps = {
 
 export function Sidebar({ query, status, threadId, onNewQuery }: SidebarProps) {
   return (
-    <div className="flex h-full flex-col gap-4">
-      <SectionCard className="p-5">
-        <div className="mb-4 flex items-center justify-between gap-3">
+    <div className="flex h-full flex-col gap-3">
+      <SectionCard className="p-4">
+        <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <p className="font-display text-lg font-semibold tracking-tight text-text">Research workspace</p>
-            <p className="text-sm text-muted">Single-session mode for the current backend capabilities.</p>
+            <p className="font-display text-lg font-semibold text-text">Research desk</p>
+            <p className="mt-1 text-sm leading-6 text-muted">One focused run at a time.</p>
           </div>
-          <Workflow className="h-5 w-5 text-accent" />
+          <div className="rounded-panel border border-accent/20 bg-accent/10 p-2 text-accent">
+            <Workflow className="h-4 w-4" />
+          </div>
         </div>
 
         <Button className="w-full" onClick={onNewQuery}>
@@ -29,21 +31,23 @@ export function Sidebar({ query, status, threadId, onNewQuery }: SidebarProps) {
         </Button>
       </SectionCard>
 
-      <SectionCard className="p-5">
-        <div className="mb-3 flex items-center gap-2">
-          <Layers3 className="h-4 w-4 text-accent" />
-          <p className="text-sm font-medium text-text">Current session</p>
+      <SectionCard className="flex-1 p-4">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Layers3 className="h-4 w-4 text-accent" />
+            <p className="text-sm font-medium text-text">Current session</p>
+          </div>
+          <Badge className="capitalize">{status}</Badge>
         </div>
-        <Badge className="mb-3 capitalize">{status}</Badge>
-        <p className="line-clamp-6 text-sm text-muted">{query || "No research brief yet."}</p>
-        {threadId ? <p className="mt-4 break-all font-mono text-xs text-muted">{threadId}</p> : null}
-      </SectionCard>
-
-      <SectionCard className="p-5">
-        <p className="text-sm font-medium text-text">History later</p>
-        <p className="mt-2 text-sm leading-7 text-muted">
-          The backend does not expose history or report retrieval yet, so this rail stays focused on the active run.
+        <p className="line-clamp-8 text-sm leading-6 text-muted">
+          {query || "Your next research brief will stay pinned here while the report builds."}
         </p>
+        {threadId ? (
+          <div className="mt-4 border-t border-white/[0.08] pt-4">
+            <p className="mb-1 text-xs font-medium text-muted">Thread</p>
+            <p className="break-all font-mono text-xs leading-5 text-muted">{threadId}</p>
+          </div>
+        ) : null}
       </SectionCard>
     </div>
   );

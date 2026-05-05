@@ -28,6 +28,8 @@ function statusVariant(status: string): "accent" | "success" | "warning" | "dang
   }
 }
 
+const metricClass = "inline-flex items-center gap-2 rounded-panel border border-white/[0.08] bg-white/[0.035] px-3 py-2 text-sm text-muted";
+
 export function StatusStrip({
   status,
   queuePosition,
@@ -37,29 +39,29 @@ export function StatusStrip({
   evidenceCount,
 }: StatusStripProps) {
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-panel border border-white/10 bg-white/[0.03] px-4 py-3">
+    <div className="flex flex-wrap items-center gap-2 rounded-panel border border-white/[0.08] bg-surface-1/70 p-2 shadow-panel">
       <Badge variant={statusVariant(status)} className="capitalize">
         {status}
       </Badge>
       {typeof queuePosition === "number" && queuePosition >= 0 ? (
-        <div className="inline-flex items-center gap-2 text-sm text-muted">
+        <div className={metricClass}>
           <Activity className="h-4 w-4" />
           Queue position {queuePosition}
         </div>
       ) : null}
-      <div className="inline-flex items-center gap-2 text-sm text-muted">
+      <div className={metricClass}>
         <TimerReset className="h-4 w-4" />
         Retries {retryCount}
       </div>
-      <div className="inline-flex items-center gap-2 text-sm text-muted">
+      <div className={metricClass}>
         <Route className="h-4 w-4" />
         Provider switches {providerSwitchCount}
       </div>
-      <div className="inline-flex items-center gap-2 text-sm text-muted">
+      <div className={metricClass}>
         <DatabaseZap className="h-4 w-4" />
         Facts extracted {factsCount}
       </div>
-      <div className="inline-flex items-center gap-2 text-sm text-muted">
+      <div className={metricClass}>
         <DatabaseZap className="h-4 w-4" />
         Evidence cards {evidenceCount}
       </div>

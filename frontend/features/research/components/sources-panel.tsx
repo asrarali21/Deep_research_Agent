@@ -16,29 +16,31 @@ type SourcesPanelProps = {
 
 function SourcesContent({ sources, status }: { sources: SourceCard[]; status: string }) {
   return (
-    <SectionCard className="h-full p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
+    <SectionCard className="h-full overflow-hidden">
+      <div className="flex items-start justify-between gap-3 border-b border-white/[0.08] p-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-muted">References</p>
-          <p className="mt-1 font-display text-xl font-semibold tracking-tight text-text">
+          <p className="text-xs font-medium uppercase text-muted">References</p>
+          <p className="mt-1 font-display text-xl font-semibold text-text">
             {sources.length ? `${sources.length} source${sources.length === 1 ? "" : "s"}` : "Sources will appear here"}
           </p>
         </div>
-        <Library className="h-5 w-5 text-accent" />
+        <div className="rounded-panel border border-accent/20 bg-accent/10 p-2 text-accent">
+          <Library className="h-4 w-4" />
+        </div>
       </div>
 
       {sources.length ? (
-        <div className="space-y-3">
+        <div className="divide-y divide-white/[0.08]">
           {sources.map((source) => (
             <a
               key={source.id}
               href={source.url}
               target="_blank"
               rel="noreferrer noopener"
-              className="group block rounded-[18px] border border-white/10 bg-white/[0.03] p-4 transition hover:border-accent/30 hover:bg-white/[0.05]"
+              className="group block p-4 transition hover:bg-white/[0.045]"
             >
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs uppercase tracking-[0.18em] text-muted">Ref {source.index}</span>
+                <span className="text-xs font-medium uppercase text-muted">Ref {source.index}</span>
                 <ExternalLink className="h-4 w-4 text-muted transition group-hover:text-accent" />
               </div>
               <p className="font-medium text-text">{source.title}</p>
@@ -48,10 +50,10 @@ function SourcesContent({ sources, status }: { sources: SourceCard[]; status: st
           ))}
         </div>
       ) : (
-        <p className="text-sm text-muted">
+        <p className="p-4 text-sm leading-6 text-muted">
           {status === "done" || status === "failed"
             ? "No structured references were detected in the final Markdown report."
-            : "Live candidate and scraped sources will appear here during research, then final report references will replace or enrich them."}
+            : "References collected during the run will land here."}
         </p>
       )}
     </SectionCard>
