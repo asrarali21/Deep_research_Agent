@@ -4,6 +4,10 @@
 
 The system does not answer directly from a single prompt. It plans the research, pauses for plan review, sends scoped tasks to worker agents, validates evidence, fills coverage gaps, drafts report sections from supported material, and assembles the final report with references.
 
+# Demo video
+
+https://github.com/user-attachments/assets/64ad5106-990b-4465-ac31-1687bbc08e12
+
 ## Architecture
 
 ```mermaid
@@ -37,6 +41,7 @@ The application is organized around a lead-worker model:
 - worker agents independently collect evidence for narrow research tasks
 - a model router selects from available LLM providers and handles fallback when a provider is rate-limited or unavailable
 - checkpointing and job state allow long-running research flows to pause, resume, and stream progress
+
 
 ## Lead Orchestrator
 
